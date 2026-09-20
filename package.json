@@ -5,12 +5,12 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "guardian": "node guardian/child.js",
     "build:icon": "node scripts/build-icon.js",
     "package:dir": "electron-builder --win dir",
     "package:win": "electron-builder --win nsis",
+    "package:portable": "electron-builder --win portable",
     "smoke": "node scripts/smoke.js",
-    "check": "node --check main.js && node --check guardian/child.js && node --check guardian/history.js && node --check guardian/rules.js && node --check guardian/runtime.js && node --check guardian/windows-service.js && node --check shared/ipc.js && node --check shared/models.js && node --check app/preload.cjs && node --check app/preload.js && node --check app/renderer.js && node scripts/smoke.js"
+    "check": "node --check main.js && node --check guardian/helper.js && node --check guardian/helper-client.js && node --check guardian/history.js && node --check guardian/rules.js && node --check guardian/runtime.js && node --check guardian/windows-service.js && node --check shared/ipc.js && node --check shared/models.js && node --check shared/rules-core.js && node --check app/preload.cjs && node --check app/renderer.js && node scripts/smoke.js"
   },
   "keywords": [
     "electron",
@@ -37,7 +37,6 @@
       "**/*",
       "!tmp-icon/**",
       "!tmp-forest-history-*/**",
-      "!plans/**",
       "!README.assets/**",
       "!docs/**",
       "!**/*.md"
@@ -51,6 +50,12 @@
       "target": [
         {
           "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
           "arch": [
             "x64"
           ]
