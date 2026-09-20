@@ -6,7 +6,10 @@ on:
 
 jobs:
   check:
-    runs-on: windows-latest
+    # windows-latest now points to the Visual Studio 2026 (v18) image, which the
+    # node-gyp bundled by extract-file-icon (via node-window-manager) cannot detect.
+    # windows-2022 ships Visual Studio 2022 (v17), which it detects correctly.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
