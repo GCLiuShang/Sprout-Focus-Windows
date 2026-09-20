@@ -1,3 +1,4 @@
+import path from 'node:path';
 import activeWindow from 'active-win';
 import windowManagerPackage from 'node-window-manager';
 import { createEmptyActiveContext } from '../shared/models.js';
@@ -28,15 +29,32 @@ export class WindowsService {
   minimizeWindow(windowId) {
     const win = this.#findWindow(windowId);
     if (!win) {
-      return false;
+      return { windowId, dispatched: false, error: 'window-not-found' };
     }
 
     try {
       win.minimize();
-      return true;
-    } catch {
-      return false;
+      return { windowId, dispatched: true };
+    } catch (error) {
+      return { windowId, dispatched: false, error: error?.message || 'minimize-failed' };
     }
+  }
+
+  listWindows() {
+    return windowManager
+      .getWindows()
+      .filter((candidate) => candidate.isWindow())
+      .map((candidate) => {
+        const processPath = candidate.path || '';
+        return {
+          id: candidate.id,
+          title: candidate.getTitle() || '',
+          processId: candidate.processId ?? null,
+          processPath,
+          processName: processPath ? path.win32.basename(processPath) : '',
+        };
+      })
+      .filter((entry) => entry.title || entry.processPath);
   }
 
   restoreWindow(windowId) {

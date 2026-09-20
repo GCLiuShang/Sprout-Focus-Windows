@@ -1,24 +1,83 @@
 import fs from 'node:fs/promises';
-import { app, BrowserWindow, Menu, Notification, Tray, ipcMain, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IPC_CHANNELS, GUARDIAN_MESSAGES, GUARDIAN_REQUESTS } from './shared/ipc.js';
-import { createInitialSessionState, formatRemaining, getDefaultSystemSafelistRules } from './shared/models.js';
-import { GuardianRuntime } from './guardian/runtime.js';
+import { createInitialSessionState, formatRemaining, getDefaultSystemSafelistRules, normalizeUserSafelistRules } from './shared/models.js';
+import { HelperBridge } from './guardian/helper-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function readArgValue(prefix) {
+  const match = process.argv.find((arg) => arg.startsWith(`${prefix}=`));
+  return match ? match.slice(prefix.length + 1) : '';
+}
+
+async function createFileLogger(dir, fileName) {
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, fileName);
+  const write = (level, parts) => {
+    const text = parts
+      .map((part) => {
+        if (part instanceof Error) return part.stack || part.message;
+        if (part && typeof part === 'object') {
+          try {
+            return JSON.stringify(part);
+          } catch {
+            return String(part);
+          }
+        }
+        return String(part);
+      })
+      .join(' ');
+    fs.appendFile(file, `[${new Date().toISOString()}] ${level} ${text}\n`, 'utf8').catch(() => {});
+  };
+  return {
+    info: (...parts) => write('INFO', parts),
+    error: (...parts) => write('ERROR', parts),
+    log: (...parts) => write('LOG', parts),
+  };
+}
+
+const isHelperMode = process.argv.includes('--guardian-helper');
+const helperPipeName = readArgValue('--helper-pipe');
+const helperTokenFile = readArgValue('--helper-token-file');
+
 const localAppDataRoot = app.isPackaged ? 'Sprout' : 'Sprout-dev';
 const localAppDataDir = process.env.LOCALAPPDATA
   ? path.join(process.env.LOCALAPPDATA, localAppDataRoot)
   : path.join(__dirname, '.sprout-local');
-const userDataDirOverride = path.join(localAppDataDir, 'user-data');
-const sessionDataDirOverride = path.join(localAppDataDir, 'session-data');
-const diskCacheDirOverride = path.join(localAppDataDir, 'cache');
+const activeDataDir = isHelperMode ? path.join(localAppDataDir, 'helper') : localAppDataDir;
+const userDataDirOverride = path.join(activeDataDir, 'user-data');
+const sessionDataDirOverride = path.join(activeDataDir, 'session-data');
+const diskCacheDirOverride = path.join(activeDataDir, 'cache');
 
 app.setPath('userData', userDataDirOverride);
 app.setPath('sessionData', sessionDataDirOverride);
 app.commandLine.appendSwitch('disk-cache-dir', diskCacheDirOverride);
+
+if (isHelperMode) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-software-rasterizer');
+}
+
+function mergeSafelistRules(defaults, stored) {
+  if (!Array.isArray(stored) || !stored.length) {
+    return defaults;
+  }
+
+  const storedById = new Map(stored.filter((rule) => rule && typeof rule === 'object').map((rule) => [rule.id, rule]));
+  const merged = defaults.map((rule) => storedById.get(rule.id) || rule);
+  const defaultIds = new Set(defaults.map((rule) => rule.id));
+  stored.forEach((rule) => {
+    if (rule && typeof rule === 'object' && !defaultIds.has(rule.id)) {
+      merged.push(rule);
+    }
+  });
+  return merged;
+}
 
 class SettingsStore {
   constructor(baseDir) {
@@ -35,6 +94,9 @@ class SettingsStore {
       openAtLogin: false,
       silentStart: false,
       systemSafelistRules: getDefaultSystemSafelistRules(),
+      userSafelistRules: [],
+      adminIntercept: 'off',
+      adminInterceptPrompt: true,
     };
   }
 
@@ -50,7 +112,12 @@ class SettingsStore {
       autoWriteHistory: input?.autoWriteHistory !== false,
       systemSafelistEnabled: input?.systemSafelistEnabled !== false,
       exitDifficulty,
-      systemSafelistRules: defaults.systemSafelistRules,
+      systemSafelistRules: mergeSafelistRules(defaults.systemSafelistRules, input?.systemSafelistRules),
+      userSafelistRules: normalizeUserSafelistRules(input?.userSafelistRules),
+      adminIntercept: ['on', 'off'].includes(input?.adminIntercept) ? input.adminIntercept : 'off',
+      adminInterceptPrompt: input?.adminInterceptPrompt !== undefined
+        ? input.adminInterceptPrompt !== false
+        : input?.adminInterceptPinned !== true,
     };
   }
 
@@ -107,40 +174,6 @@ class SettingsStore {
   }
 }
 
-function parseDashboardSummaryFromMd(fileName, content) {
-  const dateKey = fileName.replace(/\.md$/i, '');
-  const totalDurationText = (content.match(/当日总专注时长：([^\r\n]+)/) || [])[1] || '';
-  const totalSessions = Number((content.match(/当日总会话数：(\d+)/) || [])[1] || 0);
-  const totalViolations = Number((content.match(/当日总违规次数：(\d+)/) || [])[1] || 0);
-  const sessions = content
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('## ') && !line.startsWith('## 当日摘要'))
-    .map((line) => line.replace(/^##\s+/, '').trim());
-
-  return {
-    dateKey,
-    totalMinutes: parseChineseDurationToMinutes(totalDurationText),
-    totalSessions,
-    totalViolations,
-    sessions,
-  };
-}
-
-function parseChineseDurationToMinutes(input = '') {
-  const text = String(input).trim();
-  if (!text) {
-    return 0;
-  }
-
-  const hours = Number((text.match(/(\d+)\s*小时/) || [])[1] || 0);
-  const minutes = Number((text.match(/(\d+)\s*分钟/) || [])[1] || 0);
-  if (hours || minutes) {
-    return hours * 60 + minutes;
-  }
-
-  return Number((text.match(/(\d+)/) || [])[1] || 0);
-}
-
 class GuardianBridge {
   constructor() {
     this.runtime = null;
@@ -148,7 +181,12 @@ class GuardianBridge {
     this.startPromise = null;
     this.bootstrapPayload = null;
     this.onPush = null;
+    this.minimizer = null;
     this.state = createInitialSessionState();
+  }
+
+  setMinimizer(minimizer) {
+    this.minimizer = minimizer;
   }
 
   async start(bootstrapPayload, onPush) {
@@ -184,9 +222,11 @@ class GuardianBridge {
     }
 
     if (!this.runtime) {
+      const { GuardianRuntime } = await import('./guardian/runtime.js');
       this.runtime = new GuardianRuntime({
         send: (message) => this.#handleMessage(message),
         logger: console,
+        minimizer: this.minimizer,
       });
     }
 
@@ -225,6 +265,7 @@ let mainWindow = null;
 let tray = null;
 let forceQuit = false;
 const guardian = new GuardianBridge();
+let helperBridge = null;
 let settingsStore = null;
 let appSettings = null;
 let lastSessionStatus = 'idle';
@@ -247,6 +288,7 @@ function createWindow(startHidden = false) {
     icon: path.join(__dirname, 'app', 'icon.ico'),
     backgroundColor: '#0f172a',
     show: !startHidden,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'app', 'preload.cjs'),
       contextIsolation: true,
@@ -302,13 +344,10 @@ function refreshTrayMenu() {
 
   const state = guardian.state || createInitialSessionState();
   const contextLabel = state.currentContext?.title || state.currentContext?.processName || '等待前台窗口';
+  const statusLabel = state.status === 'running' ? `专注中 ${formatRemaining(state.remainingMs)}` : 'Sprout';
   const menu = Menu.buildFromTemplate([
     {
-      label: state.status === 'running' ? `专注中 ${formatRemaining(state.remainingMs)}` : 'Sprout',
-      enabled: false,
-    },
-    {
-      label: contextLabel,
+      label: `${statusLabel} · ${contextLabel}`,
       enabled: false,
     },
     { type: 'separator' },
@@ -324,6 +363,21 @@ function refreshTrayMenu() {
     {
       label: '退出程序',
       click: () => {
+        if (guardian.state?.status === 'running') {
+          const options = {
+            type: 'warning',
+            buttons: ['取消', '仍要退出'],
+            defaultId: 0,
+            cancelId: 0,
+            message: '当前正在专注中，确定要退出 Sprout 吗？',
+          };
+          const choice = mainWindow && !mainWindow.isDestroyed()
+            ? dialog.showMessageBoxSync(mainWindow, options)
+            : dialog.showMessageBoxSync(options);
+          if (choice !== 1) {
+            return;
+          }
+        }
         forceQuit = true;
         app.quit();
       },
@@ -335,22 +389,63 @@ function refreshTrayMenu() {
 
 function createTray() {
   const image = nativeImage.createFromPath(path.join(__dirname, 'app', 'icon.ico'));
+  if (image.isEmpty()) {
+    console.warn('未找到 app/icon.ico（可运行 npm run build:icon 生成），跳过托盘图标。');
+    return;
+  }
 
   tray = new Tray(image);
   tray.on('click', () => ensureWindowVisible());
   refreshTrayMenu();
 }
 
-const gotTheLock = app.requestSingleInstanceLock();
-
-if (!gotTheLock) {
-  app.quit();
-} else {
-  app.on('second-instance', (event, commandLine) => {
-    ensureWindowVisible();
-  });
-
+if (isHelperMode) {
   app.whenReady().then(async () => {
+    const logger = await createFileLogger(activeDataDir, 'helper.log');
+    logger.info('helper process start', {
+      pid: process.pid,
+      pipe: helperPipeName || '(missing)',
+      hasToken: Boolean(helperTokenFile),
+      argv: process.argv,
+    });
+
+    process.on('uncaughtException', (error) => {
+      logger.error('uncaughtException', error);
+      app.quit();
+    });
+    process.on('unhandledRejection', (reason) => {
+      logger.error('unhandledRejection', reason);
+    });
+
+    try {
+      const { startHelper } = await import('./guardian/helper.js');
+      startHelper({
+        pipeName: helperPipeName,
+        tokenFile: helperTokenFile,
+        logger,
+        onFatal: (reason) => {
+          logger.error('helper fatal', reason);
+          app.quit();
+        },
+      });
+      logger.info('helper started');
+    } catch (error) {
+      logger.error('helper import failed', error);
+      app.quit();
+    }
+  });
+  app.on('window-all-closed', (event) => event.preventDefault());
+} else {
+  const gotTheLock = app.requestSingleInstanceLock();
+
+  if (!gotTheLock) {
+    app.quit();
+  } else {
+    app.on('second-instance', (event, commandLine) => {
+      ensureWindowVisible();
+    });
+
+    app.whenReady().then(async () => {
   const userDataDir = app.getPath('userData');
   settingsStore = new SettingsStore(userDataDir);
   appSettings = await settingsStore.load();
@@ -361,6 +456,8 @@ if (!gotTheLock) {
     preferences: {
       autoWriteHistory: appSettings.autoWriteHistory,
       systemSafelistEnabled: appSettings.systemSafelistEnabled,
+      systemSafelistRules: appSettings.systemSafelistRules,
+      userSafelistRules: appSettings.userSafelistRules,
     },
   };
   const onGuardianPush = (kind, payload) => {
@@ -376,6 +473,15 @@ if (!gotTheLock) {
     }
   };
 
+  helperBridge = new HelperBridge({
+    exePath: process.execPath,
+    appArgs: app.isPackaged ? [] : [app.getAppPath()],
+    tokenFile: path.join(userDataDir, 'helper-token'),
+    logger: console,
+    onStatus: (status) => broadcast(IPC_CHANNELS.push.helperStatus, { status }),
+  });
+  guardian.setMinimizer(helperBridge);
+
   ipcMain.handle(IPC_CHANNELS.invoke.getState, async () => guardian.request(GUARDIAN_REQUESTS.getState));
   ipcMain.handle(IPC_CHANNELS.invoke.getSettings, async () => settingsStore.load());
   ipcMain.handle(IPC_CHANNELS.invoke.saveSettings, async (_event, patch) => {
@@ -384,6 +490,8 @@ if (!gotTheLock) {
       preferences: {
         autoWriteHistory: appSettings.autoWriteHistory,
         systemSafelistEnabled: appSettings.systemSafelistEnabled,
+        systemSafelistRules: appSettings.systemSafelistRules,
+        userSafelistRules: appSettings.userSafelistRules,
       },
       historyDir: appSettings.historyDir,
     });
@@ -424,51 +532,49 @@ if (!gotTheLock) {
     await fs.mkdir(settings.historyDir, { recursive: true });
     return shell.openPath(settings.historyDir);
   });
-  ipcMain.handle(IPC_CHANNELS.invoke.getDashboardSummary, async () => {
-    const settings = await settingsStore.load();
-    await fs.mkdir(settings.historyDir, { recursive: true });
-    const entries = await fs.readdir(settings.historyDir, { withFileTypes: true });
-    const files = entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
-      .map((entry) => entry.name)
-      .sort((a, b) => b.localeCompare(a))
-      .slice(0, 7);
-
-    const days = await Promise.all(files.map(async (fileName) => {
-      const fullPath = path.join(settings.historyDir, fileName);
-      const content = await fs.readFile(fullPath, 'utf8');
-      return parseDashboardSummaryFromMd(fileName, content);
-    }));
-
-    return days;
-  });
   ipcMain.handle(IPC_CHANNELS.invoke.resetSession, async () => guardian.request(GUARDIAN_REQUESTS.resetSession));
-  ipcMain.handle(IPC_CHANNELS.invoke.captureCurrentWindow, async () => guardian.request(GUARDIAN_REQUESTS.captureCurrentWindow));
   ipcMain.handle(IPC_CHANNELS.invoke.getCurrentContext, async () => guardian.request(GUARDIAN_REQUESTS.getCurrentContext));
-  ipcMain.handle(IPC_CHANNELS.invoke.startSession, async (_event, payload) => guardian.request(GUARDIAN_REQUESTS.startSession, payload));
-  ipcMain.handle(IPC_CHANNELS.invoke.endSession, async (_event, payload) => guardian.request(GUARDIAN_REQUESTS.endSession, payload));
-  ipcMain.handle(IPC_CHANNELS.invoke.openMainWindow, async () => {
-    ensureWindowVisible();
-    return { ok: true };
+  ipcMain.handle(IPC_CHANNELS.invoke.getCandidateWindow, async () => guardian.request(GUARDIAN_REQUESTS.getCandidateWindow));
+  ipcMain.handle(IPC_CHANNELS.invoke.listOpenWindows, async () => guardian.request(GUARDIAN_REQUESTS.listOpenWindows));
+  ipcMain.handle(IPC_CHANNELS.invoke.getHelperStatus, async () => ({ status: helperBridge.status }));
+  ipcMain.handle(IPC_CHANNELS.invoke.startHelper, async () => {
+    const result = await helperBridge.ensureStarted();
+    return { status: helperBridge.status, ...result };
   });
+  ipcMain.handle(IPC_CHANNELS.invoke.stopHelper, async () => {
+    await helperBridge.stop();
+    return { status: helperBridge.status };
+  });
+  ipcMain.handle(IPC_CHANNELS.invoke.startSession, async (_event, payload) => {
+    if (guardian.state?.status === 'running') {
+      return guardian.request(GUARDIAN_REQUESTS.getState);
+    }
+    return guardian.request(GUARDIAN_REQUESTS.startSession, payload);
+  });
+  ipcMain.handle(IPC_CHANNELS.invoke.endSession, async (_event, payload) => guardian.request(GUARDIAN_REQUESTS.endSession, payload));
 
   const shouldStartHidden = app.isPackaged && !!appSettings.silentStart && process.argv.includes('--hidden');
   createWindow(shouldStartHidden);
   createTray();
 
-  guardian.start(guardianBootstrap, onGuardianPush).catch((error) => {
+  await guardian.start(guardianBootstrap, onGuardianPush).catch((error) => {
     console.error('guardian 启动失败', error);
+    if (Notification.isSupported()) {
+      new Notification({ title: 'Sprout', body: '后台守卫启动失败，请查看日志。' }).show();
+    }
   });
 });
 
-app.on('window-all-closed', (event) => {
-  if (!forceQuit) {
-    event.preventDefault();
-  }
-});
+    app.on('window-all-closed', (event) => {
+      if (!forceQuit) {
+        event.preventDefault();
+      }
+    });
 
-app.on('before-quit', () => {
-  forceQuit = true;
-  guardian.stop();
-});
+    app.on('before-quit', () => {
+      forceQuit = true;
+      helperBridge?.stop();
+      guardian.stop();
+    });
+  }
 }
