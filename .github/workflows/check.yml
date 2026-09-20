@@ -16,5 +16,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # The gyp bundled with node-gyp 9 (pulled in by node-window-manager) imports
+      # distutils, which Python 3.12 removed. Pin Python 3.11.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - run: npm ci
       - run: npm run check
