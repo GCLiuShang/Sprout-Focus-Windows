@@ -15,17 +15,10 @@
           <p class="muted">杂草出现，即刻清除。</p>
         </div>
 
-        <section class="status-card">
-          <p class="small label">当前前台上下文</p>
-          <h3 id="context-title">等待检测</h3>
-          <p id="context-meta" class="muted small">—</p>
-          <p id="context-detail" class="muted small">—</p>
-        </section>
-
         <section class="status-card compact-list">
           <p class="small label">当前规则</p>
-          <div class="status-pair"><span>窗口</span><strong id="draft-window-count">0</strong></div>
-          <div class="status-pair"><span>分类</span><strong id="draft-category-count">0</strong></div>
+          <div class="status-pair"><span>精准</span><strong id="draft-precise-count">0</strong></div>
+          <div class="status-pair"><span>模糊</span><strong id="draft-fuzzy-count">0</strong></div>
           <div class="status-pair"><span>系统保护</span><strong id="draft-system-safelist">开</strong></div>
         </section>
 
@@ -37,32 +30,6 @@
       </aside>
 
       <main class="main">
-        <section class="panel compact-header">
-          <div class="compact-header-top">
-            <div class="compact-brand">
-              <p class="eyebrow">Sprout</p>
-              <h1>生长空间</h1>
-            </div>
-            <div class="compact-header-actions">
-              <button id="compact-open-dashboard-btn" class="compact-action-btn" aria-label="打开看板">📊</button>
-              <button id="compact-open-history-btn" class="compact-action-btn" aria-label="打开历史">📋</button>
-              <button id="compact-open-settings-btn" class="compact-action-btn" aria-label="打开设置">⚙</button>
-            </div>
-          </div>
-          <div class="compact-status-grid">
-            <section class="compact-status-card compact-rules-card">
-              <div class="compact-card-head">
-                <span>当前规则</span>
-                <span id="compact-rule-summary" class="muted small">尚未配置规则</span>
-              </div>
-              <div class="compact-rule-pills">
-                <div class="compact-pill"><strong id="compact-draft-window-count">0</strong><span>窗口</span></div>
-                <div class="compact-pill"><strong id="compact-draft-category-count">0</strong><span>分类</span></div>
-              </div>
-            </section>
-          </div>
-        </section>
-
         <div class="topbar panel">
           <div>
             <p class="eyebrow">Sprout</p>
@@ -72,11 +39,6 @@
 
         <section id="focus-view">
           <section class="panel timer-hero">
-            <div class="hero-heading compact-only">
-              <p class="eyebrow">Sprout</p>
-              <h2 id="compact-main-heading">准备专注</h2>
-            </div>
-
             <div id="focus-state-idle" class="focus-state active">
               <div id="hero-idle-timer" class="hero-timer">25:00</div>
               <div class="mode-switch" id="session-mode-switch">
@@ -99,8 +61,8 @@
               <p id="running-subtitle" class="muted">正在守住你这轮允许规则</p>
               <div class="metrics">
                 <div class="metric"><span class="metric-label">违规次数</span><strong id="metric-violations">0</strong></div>
-                <div class="metric"><span class="metric-label">允许窗口</span><strong id="metric-allowed-windows">0</strong></div>
-                <div class="metric"><span class="metric-label">允许分类</span><strong id="metric-allowed-categories">0</strong></div>
+                <div class="metric"><span class="metric-label">精准条目</span><strong id="metric-allowed-windows">0</strong></div>
+                <div class="metric"><span class="metric-label">模糊短语</span><strong id="metric-allowed-categories">0</strong></div>
               </div>
               <button id="exit-challenge-btn" class="btn danger large">结束专注</button>
             </div>
@@ -115,16 +77,6 @@
               </div>
               <button id="back-to-rules-btn" class="btn primary">开始新专注</button>
             </div>
-          </section>
-
-          <section id="compact-context-card" class="panel compact-context-card">
-            <div class="compact-card-head">
-              <p class="eyebrow">当前上下文</p>
-              <span id="compact-context-kind" class="muted small">—</span>
-            </div>
-            <h3 id="compact-context-title">等待检测</h3>
-            <p id="compact-context-meta" class="muted small">—</p>
-            <p id="compact-context-detail" class="muted small">—</p>
           </section>
 
           <section id="rule-summary-panel" class="panel">
@@ -164,11 +116,11 @@
 
           <div id="result-summary-grid" class="grid result-grid hidden">
             <section class="panel">
-              <p class="eyebrow">本次允许窗口</p>
+              <p class="eyebrow">本次精准条目</p>
               <div id="result-windows" class="chips"></div>
             </section>
             <section class="panel">
-              <p class="eyebrow">本次允许分类</p>
+              <p class="eyebrow">本次模糊短语</p>
               <div id="result-categories" class="chips"></div>
             </section>
           </div>
@@ -205,6 +157,69 @@
       </div>
     </div>
 
+    <div id="whitelist-rule-overlay" class="challenge-overlay hidden">
+      <div class="challenge-card whitelist-card">
+        <p class="small label muted">用户白名单规则</p>
+        <p class="muted small">命中进程或标题关键词即放行，优先于系统规则。多个关键词用 | 分隔。</p>
+        <label class="setting-row">
+          <span>名称</span>
+          <input id="whitelist-name-input" type="text" placeholder="例如 代码编辑器" />
+        </label>
+        <label class="setting-row">
+          <span>进程关键词</span>
+          <input id="whitelist-process-input" type="text" placeholder="例如 Code.exe|devenv.exe" />
+        </label>
+        <label class="setting-row">
+          <span>标题关键词</span>
+          <input id="whitelist-title-input" type="text" placeholder="可留空" />
+        </label>
+        <p id="whitelist-error" class="challenge-error hidden">进程或标题关键词至少填写一项。</p>
+        <div class="challenge-actions">
+          <button id="whitelist-cancel-btn" class="btn ghost">取消</button>
+          <button id="whitelist-save-btn" class="btn primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="admin-intercept-overlay" class="challenge-overlay hidden">
+      <div class="challenge-card admin-intercept-card">
+        <p class="small label muted">管理员级窗口拦截</p>
+        <p class="muted small">是否为本轮开启管理员级窗口拦截？开启后将请求 UAC 授权（每次启动专注都需要确认）；若拒绝授权，本轮将不会启动。</p>
+        <label class="setting-switch">
+          <input id="admin-intercept-remember-input" type="checkbox" />
+          <span>将选择固定在设置中，以后不再提示</span>
+        </label>
+        <div class="challenge-actions">
+          <button id="admin-intercept-no-btn" class="btn ghost">否</button>
+          <button id="admin-intercept-yes-btn" class="btn primary">是</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="ruleset-editor-overlay" class="challenge-overlay hidden">
+      <div class="challenge-card ruleset-editor-card">
+        <p class="small label muted" id="ruleset-editor-title">新建规则集</p>
+        <label class="setting-row">
+          <span>名称</span>
+          <input id="ruleset-name-input" type="text" placeholder="例如 编程工具" />
+        </label>
+        <label class="setting-row">
+          <span>颜色</span>
+          <div class="color-input-row">
+            <input id="ruleset-color-input" type="color" value="#4ade80" />
+            <span id="ruleset-color-hex" class="muted small">#4ade80</span>
+          </div>
+        </label>
+        <p id="ruleset-editor-error" class="challenge-error hidden">请填写名称。</p>
+        <div class="challenge-actions">
+          <button id="ruleset-editor-cancel-btn" class="btn ghost">取消</button>
+          <button id="ruleset-editor-save-btn" class="btn primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="start-lock-overlay" class="start-lock hidden" aria-hidden="true"></div>
+
     <div id="rules-drawer-overlay" class="drawer-overlay hidden">
       <div class="drawer" id="rules-drawer">
         <div class="drawer-header">
@@ -213,62 +228,101 @@
         </div>
 
         <section class="panel drawer-active-summary">
-          <p class="eyebrow">本轮已选规则</p>
+          <p class="eyebrow">本轮已启用</p>
           <div id="drawer-active-summary" class="drawer-summary-scroll"></div>
         </section>
 
         <div class="drawer-tabs">
-          <button class="drawer-tab active" data-tab="windows">允许窗口</button>
-          <button class="drawer-tab" data-tab="categories">分类规则</button>
+          <button class="drawer-tab active" data-tab="precise">精准匹配</button>
+          <button class="drawer-tab" data-tab="fuzzy">模糊匹配</button>
         </div>
 
-        <div class="drawer-tab-panel" id="drawer-tab-windows">
+        <div class="drawer-tab-panel" id="drawer-tab-precise">
+          <section class="panel candidate-card-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">候选窗口</p>
+                <h3>把目标窗口切到前台，这里会实时显示</h3>
+              </div>
+              <span id="candidate-refresh-state" class="muted small">等待检测</span>
+            </div>
+            <h4 id="candidate-title">等待检测</h4>
+            <p id="candidate-meta" class="muted small">—</p>
+            <p id="candidate-detail" class="muted small">—</p>
+            <div class="candidate-rule-preview">
+              <p class="small label">将生成的条目</p>
+              <pre id="candidate-rule-preview" class="json-box">—</pre>
+            </div>
+            <div class="mode-switch" id="candidate-type-switch">
+              <button type="button" class="mode-switch-btn active" data-type="window">窗口</button>
+              <button type="button" class="mode-switch-btn" data-type="process">进程</button>
+            </div>
+            <p id="candidate-type-hint" class="muted small">窗口：匹配该窗口的标题与进程路径；进程：匹配该进程的所有窗口。</p>
+            <div class="ruleset-target-row">
+              <span>加入规则集</span>
+              <select id="precise-target-set"></select>
+            </div>
+            <button id="candidate-add-btn" class="btn primary">加入规则集</button>
+          </section>
+
+          <section class="panel precise-manual-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">手动添加进程</p>
+                <h3>需精确输入进程名或完整路径</h3>
+              </div>
+            </div>
+            <div class="manual-add-row">
+              <input id="precise-manual-input" type="text" placeholder="例如 Code.exe 或完整路径" />
+              <button id="precise-manual-add-btn" class="btn primary">添加</button>
+            </div>
+          </section>
+
           <section class="panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">允许窗口</p>
-                <h3>按当前活跃窗口加入</h3>
+                <p class="eyebrow">精准规则集</p>
+                <h3>启用后参与精确匹配</h3>
               </div>
-              <button id="capture-window-btn" class="btn primary">加入当前窗口</button>
+              <button id="precise-add-set-btn" class="btn primary">新建规则集</button>
             </div>
-            <div id="windows-empty" class="empty">还没有允许窗口。先把目标窗口切到前台，再点右上角按钮。</div>
-            <div id="windows-list" class="chips"></div>
+            <div id="precise-ruleset-empty" class="empty">
+              <svg class="empty-icon" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/><circle cx="18" cy="17" r="2.4"/></svg>
+              <span>还没有精准规则集。切到目标窗口后加入，或手动添加进程。</span>
+            </div>
+            <div id="precise-ruleset-list" class="ruleset-list"></div>
           </section>
         </div>
 
-        <div class="drawer-tab-panel hidden" id="drawer-tab-categories">
-          <section class="panel">
+        <div class="drawer-tab-panel hidden" id="drawer-tab-fuzzy">
+          <section class="panel fuzzy-from-window-panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">分类规则</p>
-                <h3>命中标题、进程或路径就允许</h3>
+                <p class="eyebrow">从窗口添加关键词</p>
+                <h3>选择一个窗口，提取进程名或标题片段</h3>
               </div>
-              <button id="restore-default-categories-btn" class="btn ghost">恢复默认分类</button>
+              <button id="refresh-open-windows-btn" class="btn small ghost">刷新窗口</button>
             </div>
-            <p class="muted small">pattern 支持正则；不想写正则就直接用 | 隔开关键词。默认会带一个 Browser 分类，方便整类放行浏览器窗口。</p>
-            <div class="category-form">
-              <input id="category-name-input" type="text" placeholder="分类名，例如 AI" />
-              <input id="category-pattern-input" type="text" placeholder="pattern，例如 ChatGPT|Claude|Gemini" />
-              <input id="category-color-input" type="color" value="#e2ebd7" />
-              <button id="save-category-btn" class="btn primary">保存分类</button>
+            <div id="fuzzy-open-windows-empty" class="empty">
+              <svg class="empty-icon" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8"/><path d="M12 18v2"/></svg>
+              <span>点“刷新窗口”列出当前打开的窗口。</span>
             </div>
-            <div id="category-rule-list" class="rule-list"></div>
+            <div id="fuzzy-open-windows" class="rule-list scroll-area"></div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">本轮已选分类</p>
-                <h3>命中就允许</h3>
+                <p class="eyebrow">模糊规则集</p>
+                <h3>短语命中标题 / 进程 / 路径即放行</h3>
               </div>
+              <button id="fuzzy-add-set-btn" class="btn primary">新建规则集</button>
             </div>
-            <div id="selected-categories-empty" class="empty">还没有把任何分类加入本轮专注。</div>
-            <div id="selected-categories-list" class="chips"></div>
-          </section>
-
-          <section class="panel">
-            <p class="small label">开局说明</p>
-            <p class="muted small">运行后规则会锁定。系统安全白名单会自动放行 Windows 关键窗口，避免把资源管理器和系统壳层误判成违规。</p>
+            <div id="fuzzy-ruleset-empty" class="empty">
+              <svg class="empty-icon" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h6"/><circle cx="17.5" cy="14.5" r="2"/></svg>
+              <span>还没有模糊规则集。新建后用短语描述一类窗口。</span>
+            </div>
+            <div id="fuzzy-ruleset-list" class="ruleset-list"></div>
           </section>
         </div>
       </div>
@@ -397,6 +451,22 @@
                   <span>启用系统安全白名单</span>
                 </label>
               </div>
+              <div class="setting-item">
+                <label class="setting-switch">
+                  <input id="admin-intercept-prompt-input" type="checkbox" />
+                  <span>点击“开始专注”后不再显示提示窗口</span>
+                </label>
+                <div class="muted small setting-desc">不勾选时每次开始都会弹出提示，由临场选择决定；与提示窗口的“记住”同步</div>
+              </div>
+              <div class="setting-item">
+                <label class="setting-switch">
+                  <input id="admin-intercept-enabled-input" type="checkbox" />
+                  <span>拦截以管理员身份运行的窗口</span>
+                </label>
+                <div class="muted small setting-desc">每次启动专注时都需要 UAC 弹窗确认；仅在上方提示被关闭时生效</div>
+                <div id="admin-intercept-disabled-hint" class="muted small setting-desc">当前由每次提示决定，此项不生效</div>
+                <div id="admin-helper-status" class="muted small setting-desc"></div>
+              </div>
               <label class="setting-row">
                 <span>退出验证难度</span>
                 <select id="exit-difficulty-input">
@@ -427,6 +497,18 @@
             <span class="muted small">这些规则当前只展示，不开放编辑</span>
           </div>
           <div id="system-safelist-list" class="rule-list"></div>
+        </section>
+
+        <section class="panel settings-user-safelist-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">用户白名单</p>
+              <h3>命中即放行，优先于系统规则</h3>
+            </div>
+            <button id="add-user-safelist-btn" class="btn primary">新增</button>
+          </div>
+          <div id="user-safelist-empty" class="empty">还没有用户白名单规则。</div>
+          <div id="user-safelist-list" class="rule-list"></div>
         </section>
       </div>
     </div>

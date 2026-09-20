@@ -1,14 +1,24 @@
-import { getDefaultCategoryRules } from '../shared/models.js';
+import {
+  MAX_RULE_SET_ITEMS,
+  MAX_RULE_SETS,
+  buildRuleSetsFromLegacy,
+  createFuzzyPhrase,
+  createFuzzyRuleSet,
+  createPreciseItem,
+  createPreciseRuleSet,
+  createUserSafelistRule,
+  normalizeFuzzyRuleSets,
+  normalizePreciseRuleSets,
+} from '../shared/models.js';
 
-const DEFAULT_CATEGORY_RULES = getDefaultCategoryRules();
 const api = window.forestApi;
+const initialRuleSets = loadRuleSets();
 const state = {
   session: null,
   settings: null,
   currentContext: null,
-  allowedWindows: [],
-  categoryRules: loadCategoryRules(),
-  allowedCategories: [],
+  preciseRuleSets: initialRuleSets.preciseRuleSets,
+  fuzzyRuleSets: initialRuleSets.fuzzyRuleSets,
   sessionMode: 'countdown',
   exitDifficulty: 'easy',
   challengeTimer: null,
@@ -17,7 +27,14 @@ const state = {
   historyContent: '',
   dashboardDays: [],
   selectedDashboardDay: null,
-  lastCategoryRuleAnchorId: null,
+  editingWhitelistRuleId: null,
+  candidate: null,
+  candidateType: 'window',
+  candidateTimer: null,
+  helperStatus: 'off',
+  pendingAdminStart: null,
+  starting: false,
+  rulesetEditor: null,
 };
 
 const __elCache = new Map();
@@ -30,6 +47,12 @@ const el = (id) => {
   return cached;
 };
 
+function setEmptyVisible(element, visible) {
+  if (element) {
+    element.style.display = visible ? '' : 'none';
+  }
+}
+
 function escapeHTML(str) {
   if (str == null) return '';
   return String(str)
@@ -40,80 +63,72 @@ function escapeHTML(str) {
     .replace(/'/g, '&#039;');
 }
 
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-function normalizeCategoryRules(input) {
-  const defaults = clone(DEFAULT_CATEGORY_RULES);
-  if (!Array.isArray(input) || !input.length) {
-    return defaults;
-  }
-
-  const list = input
-    .filter((item) => item && typeof item === 'object')
-    .map((item) => ({
-      id: String(item.id || `category-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`),
-      name: String(item.name || '未命名分类').trim(),
-      color: String(item.color || '#38bdf8'),
-      pattern: String(item.pattern || '').trim(),
-      enabled: item.enabled !== false,
-      createdAt: item.createdAt || new Date().toISOString(),
-    }))
-    .filter((item) => item.name && item.pattern);
-
-  if (!list.length) {
-    return defaults;
-  }
-
-  defaults.forEach((item) => {
-    if (!list.some((rule) => rule.id === item.id)) {
-      list.push(clone(item));
-    }
-  });
-  return list;
-}
-
-function loadCategoryRules() {
+function readJson(key) {
   try {
-    const saved = localStorage.getItem('forest-category-rules');
-    if (!saved) return clone(DEFAULT_CATEGORY_RULES);
-    const parsed = JSON.parse(saved);
-    return normalizeCategoryRules(parsed);
-  } catch {
-    return clone(DEFAULT_CATEGORY_RULES);
-  }
-}
-
-function persistCategoryRules() {
-  localStorage.setItem('forest-category-rules', JSON.stringify(state.categoryRules));
-}
-
-function loadLastRules() {
-  try {
-    const saved = localStorage.getItem('sprout-last-rules');
-    if (!saved) return null;
-    return JSON.parse(saved);
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-function persistLastRules() {
-  localStorage.setItem('sprout-last-rules', JSON.stringify({
-    allowedWindows: state.allowedWindows,
-    allowedCategories: state.allowedCategories,
-  }));
+function writeJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
 }
 
-function reconcileAllowedCategories() {
-  const library = new Map(state.categoryRules.map((rule) => [rule.id, rule]));
-  state.allowedCategories = state.allowedCategories
-    .map((item) => {
-      const source = library.get(item.id);
-      return source ? clone(source) : null;
-    })
-    .filter(Boolean);
+function migrateLegacyRuleSetsIfNeeded() {
+  try {
+    if (localStorage.getItem('sprout-rules-migrated') === '1') {
+      return false;
+    }
+
+    const categoryRules = readJson('forest-category-rules');
+    const lastRules = readJson('sprout-last-rules');
+    const migrated = buildRuleSetsFromLegacy({
+      categoryRules: Array.isArray(categoryRules) ? categoryRules : [],
+      lastRules,
+    });
+
+    writeJson('sprout-precise-rulesets', migrated.preciseRuleSets);
+    writeJson('sprout-fuzzy-rulesets', migrated.fuzzyRuleSets);
+    return migrated.preciseRuleSets.length > 0 || migrated.fuzzyRuleSets.length > 0;
+  } finally {
+    localStorage.setItem('sprout-rules-migrated', '1');
+    localStorage.removeItem('forest-category-rules');
+    localStorage.removeItem('sprout-last-rules');
+  }
+}
+
+function loadRuleSets() {
+  try {
+    migrateLegacyRuleSetsIfNeeded();
+  } catch {
+    // ignore migration failures
+  }
+  return {
+    preciseRuleSets: normalizePreciseRuleSets(readJson('sprout-precise-rulesets')),
+    fuzzyRuleSets: normalizeFuzzyRuleSets(readJson('sprout-fuzzy-rulesets')),
+  };
+}
+
+function persistPreciseRuleSets() {
+  writeJson('sprout-precise-rulesets', state.preciseRuleSets);
+}
+
+function persistFuzzyRuleSets() {
+  writeJson('sprout-fuzzy-rulesets', state.fuzzyRuleSets);
+}
+
+function enabledPreciseItems() {
+  return state.preciseRuleSets
+    .filter((set) => set.enabled)
+    .flatMap((set) => set.items.map((item) => ({ ...item, setId: set.id, setName: set.name, setColor: set.color })));
+}
+
+function enabledFuzzyPhrases() {
+  return state.fuzzyRuleSets
+    .filter((set) => set.enabled)
+    .flatMap((set) => set.phrases.map((phrase) => ({ ...phrase, setId: set.id, setName: set.name, setColor: set.color })));
 }
 
 function formatTime(ms) {
@@ -150,8 +165,10 @@ function formatClock(ms) {
 
 function summarizeRules() {
   const parts = [];
-  if (state.allowedWindows.length) parts.push(`${state.allowedWindows.length} 个窗口`);
-  if (state.allowedCategories.length) parts.push(state.allowedCategories.map((c) => c.name).join(', '));
+  const preciseCount = enabledPreciseItems().length;
+  const fuzzyCount = enabledFuzzyPhrases().length;
+  if (preciseCount) parts.push(`${preciseCount} 个精准条目`);
+  if (fuzzyCount) parts.push(`${fuzzyCount} 个模糊短语`);
   return parts;
 }
 
@@ -166,11 +183,6 @@ function formatContextDetail(current = {}) {
   return current.processPath || '—';
 }
 
-function formatContextKind(current = {}) {
-  if (current.processName) return '前台窗口';
-  return '未检测到前台窗口';
-}
-
 function showToast(message, tone = 'normal') {
   const toast = el('toast');
   toast.textContent = message;
@@ -180,20 +192,6 @@ function showToast(message, tone = 'normal') {
   showToast.timer = setTimeout(() => toast.classList.remove('show'), 2600);
 }
 
-function scrollCategoryEditorIntoView() {
-  const target = el('category-name-input');
-  if (!target) return;
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  setTimeout(() => target.focus(), 180);
-}
-
-function scrollCategoryRuleIntoView(id) {
-  if (!id) return;
-  const row = document.querySelector(`[data-category-rule-id="${id}"]`);
-  if (!row) return;
-  row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
 function syncDrawerScrollLock() {
   const anyOpen = ['rules', 'history', 'settings', 'dashboard']
     .some((name) => !el(`${name}-drawer-overlay`)?.classList.contains('hidden'));
@@ -201,17 +199,44 @@ function syncDrawerScrollLock() {
 }
 
 function openDrawer(name) {
-  el(`${name}-drawer-overlay`).classList.remove('hidden');
+  const overlay = el(`${name}-drawer-overlay`);
+  if (!overlay) return;
+  overlay.classList.remove('hidden', 'closing');
   syncDrawerScrollLock();
-  if (name === 'rules') renderDrawerActiveSummary();
+  if (name === 'rules') {
+    renderRulesSummary();
+    renderPreciseRuleSets();
+    renderFuzzyRuleSets();
+    startCandidatePolling();
+  }
 }
 
 function closeDrawer(name) {
-  el(`${name}-drawer-overlay`).classList.add('hidden');
-  syncDrawerScrollLock();
+  const overlay = el(`${name}-drawer-overlay`);
+  if (!overlay || overlay.classList.contains('hidden') || overlay.classList.contains('closing')) {
+    return;
+  }
+
+  const drawer = overlay.querySelector('.drawer');
+  const finish = () => {
+    overlay.classList.add('hidden');
+    overlay.classList.remove('closing');
+    syncDrawerScrollLock();
+    if (drawer) drawer.removeEventListener('animationend', finish);
+  };
+
+  overlay.classList.add('closing');
+  if (drawer) {
+    drawer.addEventListener('animationend', finish);
+    setTimeout(finish, 320);
+  } else {
+    finish();
+  }
+
   if (name === 'rules') {
     renderCompactRuleSummary();
     renderDraftSummary();
+    stopCandidatePolling();
   }
 }
 
@@ -219,28 +244,464 @@ function switchRulesTab(name) {
   document.querySelectorAll('.drawer-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.tab === name);
   });
-  ['windows', 'categories'].forEach((tab) => {
+  ['precise', 'fuzzy'].forEach((tab) => {
     el(`drawer-tab-${tab}`)?.classList.toggle('hidden', tab !== name);
+  });
+  const tabs = el('rules-drawer')?.querySelector('.drawer-tabs');
+  if (tabs) tabs.style.setProperty('--tab-index', name === 'fuzzy' ? '1' : '0');
+}
+
+const CANDIDATE_POLL_MS = 1000;
+
+function startCandidatePolling() {
+  stopCandidatePolling();
+  refreshCandidateWindow();
+  state.candidateTimer = setInterval(refreshCandidateWindow, CANDIDATE_POLL_MS);
+}
+
+function stopCandidatePolling() {
+  if (state.candidateTimer) {
+    clearInterval(state.candidateTimer);
+    state.candidateTimer = null;
+  }
+}
+
+async function refreshCandidateWindow() {
+  if (!api) return;
+  try {
+    const payload = await api.getCandidateWindow();
+    state.candidate = payload?.context || null;
+  } catch {
+    state.candidate = null;
+  }
+  renderCandidateWindow(state.candidate);
+}
+
+function renderCandidateWindow(context) {
+  el('candidate-title').textContent = context?.title || '等待检测';
+  el('candidate-meta').textContent = formatContextMeta(context || {});
+  el('candidate-detail').textContent = formatContextDetail(context || {});
+  el('candidate-refresh-state').textContent = context?.windowId ? '已检测到窗口' : '等待检测';
+  el('candidate-rule-preview').textContent = context?.windowId
+    ? describeCandidateItem(context, state.candidateType)
+    : '—';
+  const addBtn = el('candidate-add-btn');
+  if (addBtn) addBtn.disabled = !context?.windowId;
+  renderCandidateTypeSwitch();
+  renderPreciseTargetOptions();
+}
+
+function renderCandidateTypeSwitch() {
+  document.querySelectorAll('#candidate-type-switch .mode-switch-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.type === state.candidateType);
   });
 }
 
-function renderDrawerActiveSummary() {
-  const container = el('drawer-active-summary');
-  if (!container) return;
+function describeCandidateItem(context, type) {
+  if (type === 'process') {
+    return `类型：进程\n进程路径：${context.processPath || '—'}\n进程名：${context.processName || '—'}`;
+  }
+  return `类型：窗口\n进程路径：${context.processPath || '—'}\n标题：${context.title || '—'}`;
+}
 
+function renderPreciseTargetOptions() {
+  const select = el('precise-target-set');
+  if (!select) return;
+  const previous = select.value;
   const frag = document.createDocumentFragment();
-  const hasAny = state.allowedWindows.length || state.allowedCategories.length;
-  if (!hasAny) {
-    const p = document.createElement('p');
-    p.className = 'muted small';
-    p.textContent = '尚未选择任何规则';
-    frag.appendChild(p);
-    container.replaceChildren(frag);
+  state.preciseRuleSets.forEach((set) => {
+    const option = document.createElement('option');
+    option.value = set.id;
+    option.textContent = set.name;
+    frag.appendChild(option);
+  });
+  const createOpt = document.createElement('option');
+  createOpt.value = '__new__';
+  createOpt.textContent = '＋ 新建规则集…';
+  frag.appendChild(createOpt);
+  select.replaceChildren(frag);
+  if (previous && Array.from(select.options).some((option) => option.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function resolveTargetSetId(side, selectId) {
+  const select = el(selectId);
+  if (!select) return null;
+  if (select.value === '__new__') {
+    openRulesetEditor(side, null, (created) => {
+      select.value = created.id;
+    });
+    return null;
+  }
+  return select.value || null;
+}
+
+function addPreciseFromCandidate() {
+  const context = state.candidate;
+  if (!context?.windowId) {
+    showToast('暂无可加入的窗口', 'danger');
+    return;
+  }
+  const setId = resolveTargetSetId('precise', 'precise-target-set');
+  if (!setId) return;
+  const set = state.preciseRuleSets.find((item) => item.id === setId);
+  if (!set) return;
+  if (set.items.length >= MAX_RULE_SET_ITEMS) {
+    showToast(`每个规则集最多 ${MAX_RULE_SET_ITEMS} 条`, 'danger');
     return;
   }
 
-  function addGroup(label, items) {
-    if (!items.length) return;
+  const item = createPreciseItem({
+    type: state.candidateType,
+    label: context.title || context.processName || '未命名条目',
+    processPath: context.processPath || '',
+    processName: context.processName || '',
+    title: state.candidateType === 'window' ? (context.title || '') : '',
+    windowId: context.windowId ?? null,
+  });
+  const duplicate = set.items.some((existing) => existing.type === item.type
+    && (existing.processPath || '').toLowerCase() === item.processPath.toLowerCase()
+    && (item.type === 'process' || (existing.title || '') === item.title));
+  if (duplicate) {
+    showToast('该条目已存在于这个规则集中');
+    return;
+  }
+
+  set.items.push(item);
+  persistPreciseRuleSets();
+  renderPreciseRuleSets();
+  renderRulesSummary();
+  renderContext(context);
+  showToast(`已加入「${set.name}」：${item.label}`);
+}
+
+function addPreciseManual() {
+  const input = el('precise-manual-input');
+  const value = input.value.trim();
+  if (!value) {
+    showToast('请输入进程名或完整路径', 'danger');
+    return;
+  }
+  const setId = resolveTargetSetId('precise', 'precise-target-set');
+  if (!setId) return;
+  const set = state.preciseRuleSets.find((item) => item.id === setId);
+  if (!set) return;
+  if (set.items.length >= MAX_RULE_SET_ITEMS) {
+    showToast(`每个规则集最多 ${MAX_RULE_SET_ITEMS} 条`, 'danger');
+    return;
+  }
+
+  const isPath = value.includes('\\') || value.includes('/');
+  set.items.push(createPreciseItem({
+    type: 'process',
+    label: value,
+    processPath: isPath ? value : '',
+    processName: isPath ? '' : value,
+  }));
+  input.value = '';
+  persistPreciseRuleSets();
+  renderPreciseRuleSets();
+  renderRulesSummary();
+  showToast(`已添加进程规则：${value}`);
+}
+
+function removePreciseItem(setId, itemId) {
+  const set = state.preciseRuleSets.find((item) => item.id === setId);
+  if (!set) return;
+  set.items = set.items.filter((item) => item.id !== itemId);
+  persistPreciseRuleSets();
+  renderPreciseRuleSets();
+  renderRulesSummary();
+}
+
+function addFuzzyPhrase(setId, text, mode = 'text') {
+  const set = state.fuzzyRuleSets.find((item) => item.id === setId);
+  const value = String(text || '').trim();
+  if (!set || !value) return;
+  if (set.phrases.length >= MAX_RULE_SET_ITEMS) {
+    showToast(`每个规则集最多 ${MAX_RULE_SET_ITEMS} 条`, 'danger');
+    return;
+  }
+  if (set.phrases.some((phrase) => phrase.text === value && phrase.mode === mode)) {
+    showToast('该短语已存在于这个规则集中');
+    return;
+  }
+  if (mode === 'regex') {
+    try {
+      new RegExp(value, 'i');
+    } catch {
+      showToast('正则表达式无效', 'danger');
+      return;
+    }
+  }
+  set.phrases.push(createFuzzyPhrase({ text: value, mode }));
+  persistFuzzyRuleSets();
+  renderFuzzyRuleSets();
+  renderRulesSummary();
+}
+
+function removeFuzzyPhrase(setId, phraseId) {
+  const set = state.fuzzyRuleSets.find((item) => item.id === setId);
+  if (!set) return;
+  set.phrases = set.phrases.filter((phrase) => phrase.id !== phraseId);
+  persistFuzzyRuleSets();
+  renderFuzzyRuleSets();
+  renderRulesSummary();
+}
+
+function toggleFuzzyPhraseMode(setId, phraseId) {
+  const set = state.fuzzyRuleSets.find((item) => item.id === setId);
+  const phrase = set?.phrases.find((item) => item.id === phraseId);
+  if (!phrase) return;
+  if (phrase.mode === 'text') {
+    try {
+      new RegExp(phrase.text, 'i');
+    } catch {
+      showToast('该短语不是合法正则，无法切换', 'danger');
+      return;
+    }
+    phrase.mode = 'regex';
+  } else {
+    phrase.mode = 'text';
+  }
+  persistFuzzyRuleSets();
+  renderFuzzyRuleSets();
+}
+
+function toggleRuleSet(side, id) {
+  const list = side === 'precise' ? state.preciseRuleSets : state.fuzzyRuleSets;
+  const set = list.find((item) => item.id === id);
+  if (!set) return;
+  set.enabled = !set.enabled;
+  (side === 'precise' ? persistPreciseRuleSets : persistFuzzyRuleSets)();
+  (side === 'precise' ? renderPreciseRuleSets : renderFuzzyRuleSets)();
+  renderRulesSummary();
+}
+
+function deleteRuleSet(side, id) {
+  if (side === 'precise') {
+    state.preciseRuleSets = state.preciseRuleSets.filter((set) => set.id !== id);
+    persistPreciseRuleSets();
+    renderPreciseRuleSets();
+  } else {
+    state.fuzzyRuleSets = state.fuzzyRuleSets.filter((set) => set.id !== id);
+    persistFuzzyRuleSets();
+    renderFuzzyRuleSets();
+  }
+  renderRulesSummary();
+}
+
+function openRulesetEditor(side, set, onCreated) {
+  if (!set && side) {
+    const list = side === 'precise' ? state.preciseRuleSets : state.fuzzyRuleSets;
+    if (list.length >= MAX_RULE_SETS) {
+      showToast(`最多 ${MAX_RULE_SETS} 个规则集`, 'danger');
+      return;
+    }
+  }
+  state.rulesetEditor = { side, id: set?.id || null, onCreated: typeof onCreated === 'function' ? onCreated : null };
+  el('ruleset-editor-title').textContent = set ? '编辑规则集' : '新建规则集';
+  el('ruleset-name-input').value = set?.name || '';
+  const color = set?.color || (side === 'fuzzy' ? '#a78bfa' : '#4ade80');
+  el('ruleset-color-input').value = color;
+  el('ruleset-color-hex').textContent = color;
+  el('ruleset-editor-error').classList.add('hidden');
+  el('ruleset-editor-overlay').classList.remove('hidden');
+  el('ruleset-name-input').focus();
+}
+
+function closeRulesetEditor() {
+  el('ruleset-editor-overlay').classList.add('hidden');
+  state.rulesetEditor = null;
+}
+
+function saveRulesetEditor() {
+  const editor = state.rulesetEditor;
+  if (!editor) return;
+  const name = el('ruleset-name-input').value.trim();
+  const color = el('ruleset-color-input').value;
+  if (!name) {
+    el('ruleset-editor-error').classList.remove('hidden');
+    return;
+  }
+
+  const list = editor.side === 'precise' ? state.preciseRuleSets : state.fuzzyRuleSets;
+  if (editor.id) {
+    const set = list.find((item) => item.id === editor.id);
+    if (set) {
+      set.name = name;
+      set.color = color;
+    }
+  } else {
+    const created = editor.side === 'precise'
+      ? createPreciseRuleSet({ name, color })
+      : createFuzzyRuleSet({ name, color });
+    list.push(created);
+    if (editor.onCreated) editor.onCreated(created);
+  }
+
+  (editor.side === 'precise' ? persistPreciseRuleSets : persistFuzzyRuleSets)();
+  (editor.side === 'precise' ? renderPreciseRuleSets : renderFuzzyRuleSets)();
+  renderRulesSummary();
+  closeRulesetEditor();
+}
+
+function renderRuleSetCard(side, set) {
+  const card = document.createElement('div');
+  card.className = `ruleset-card ${set.enabled ? 'enabled' : ''}`;
+  card.dataset.setId = set.id;
+  card.dataset.side = side;
+  card.style.setProperty('--ruleset-color', set.color);
+
+  const head = document.createElement('div');
+  head.className = 'ruleset-head';
+  const count = side === 'precise' ? set.items.length : set.phrases.length;
+  head.innerHTML = `<span class="color-dot" style="background:${escapeHTML(set.color)}"></span><span class="ruleset-name">${escapeHTML(set.name)}</span><span class="ruleset-count">${count}/${MAX_RULE_SET_ITEMS}</span>`;
+
+  const toggle = document.createElement('label');
+  toggle.className = 'ruleset-toggle';
+  toggle.innerHTML = `<input type="checkbox" ${set.enabled ? 'checked' : ''}><span class="track"></span>`;
+  toggle.querySelector('input').addEventListener('change', () => toggleRuleSet(side, set.id));
+  head.appendChild(toggle);
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'ruleset-icon-btn';
+  editBtn.textContent = '编辑';
+  editBtn.addEventListener('click', () => openRulesetEditor(side, set));
+  const delBtn = document.createElement('button');
+  delBtn.className = 'ruleset-icon-btn';
+  delBtn.textContent = '删除';
+  delBtn.addEventListener('click', () => deleteRuleSet(side, set.id));
+  head.appendChild(editBtn);
+  head.appendChild(delBtn);
+  card.appendChild(head);
+
+  const items = document.createElement('div');
+  items.className = 'ruleset-items';
+  if (side === 'precise') {
+    if (!set.items.length) {
+      const hint = document.createElement('p');
+      hint.className = 'ruleset-empty-hint';
+      hint.textContent = '空规则集，请从上方加入窗口或手动添加进程。';
+      items.appendChild(hint);
+    }
+    set.items.forEach((item) => {
+      const chip = document.createElement('span');
+      chip.className = 'ruleset-item';
+      const badge = document.createElement('span');
+      badge.className = 'type-badge';
+      badge.textContent = item.type === 'process' ? '进程' : '窗口';
+      chip.appendChild(badge);
+      const text = document.createElement('span');
+      text.className = 'ruleset-item-text clamp-2';
+      text.textContent = item.label || item.title || item.processName || '未命名条目';
+      chip.appendChild(text);
+      const remove = document.createElement('button');
+      remove.className = 'remove-btn';
+      remove.textContent = '×';
+      remove.addEventListener('click', () => removePreciseItem(set.id, item.id));
+      chip.appendChild(remove);
+      items.appendChild(chip);
+    });
+  } else {
+    if (!set.phrases.length) {
+      const hint = document.createElement('p');
+      hint.className = 'ruleset-empty-hint';
+      hint.textContent = '空规则集，请在下方输入短语。';
+      items.appendChild(hint);
+    }
+    set.phrases.forEach((phrase) => {
+      const chip = document.createElement('span');
+      chip.className = 'ruleset-item';
+      const text = document.createElement('span');
+      text.className = 'ruleset-item-text clamp-2';
+      text.textContent = phrase.text;
+      chip.appendChild(text);
+      const mode = document.createElement('span');
+      mode.className = 'mode-badge';
+      mode.textContent = phrase.mode === 'regex' ? '正则' : '文本';
+      mode.title = '点击切换 文本/正则';
+      mode.addEventListener('click', () => toggleFuzzyPhraseMode(set.id, phrase.id));
+      chip.appendChild(mode);
+      const remove = document.createElement('button');
+      remove.className = 'remove-btn';
+      remove.textContent = '×';
+      remove.addEventListener('click', () => removeFuzzyPhrase(set.id, phrase.id));
+      chip.appendChild(remove);
+      items.appendChild(chip);
+    });
+  }
+  card.appendChild(items);
+
+  if (side === 'fuzzy') {
+    const addRow = document.createElement('div');
+    addRow.className = 'ruleset-add-row';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '输入短语后回车添加';
+    const regexLabel = document.createElement('label');
+    regexLabel.className = 'setting-switch';
+    regexLabel.innerHTML = '<input type="checkbox"><span>高级正则</span>';
+    const regexInput = regexLabel.querySelector('input');
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn small primary';
+    addBtn.textContent = '添加短语';
+    const submit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      addFuzzyPhrase(set.id, value, regexInput.checked ? 'regex' : 'text');
+      input.value = '';
+      regexInput.checked = false;
+    };
+    addBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') submit();
+    });
+    addRow.appendChild(input);
+    addRow.appendChild(regexLabel);
+    addRow.appendChild(addBtn);
+    card.appendChild(addRow);
+  }
+
+  return card;
+}
+
+function renderPreciseRuleSets() {
+  const list = el('precise-ruleset-list');
+  if (!list) return;
+  const empty = el('precise-ruleset-empty');
+  setEmptyVisible(empty, state.preciseRuleSets.length === 0);
+  const frag = document.createDocumentFragment();
+  state.preciseRuleSets.forEach((set, index) => {
+    const card = renderRuleSetCard('precise', set);
+    card.style.setProperty('--i', index);
+    frag.appendChild(card);
+  });
+  list.replaceChildren(frag);
+  renderPreciseTargetOptions();
+}
+
+function renderFuzzyRuleSets() {
+  const list = el('fuzzy-ruleset-list');
+  if (!list) return;
+  const empty = el('fuzzy-ruleset-empty');
+  setEmptyVisible(empty, state.fuzzyRuleSets.length === 0);
+  const frag = document.createDocumentFragment();
+  state.fuzzyRuleSets.forEach((set, index) => {
+    const card = renderRuleSetCard('fuzzy', set);
+    card.style.setProperty('--i', index);
+    frag.appendChild(card);
+  });
+  list.replaceChildren(frag);
+}
+
+function renderRulesSummary() {
+  const container = el('drawer-active-summary');
+  if (!container) return;
+  const frag = document.createDocumentFragment();
+
+  const addGroup = (label, sets) => {
     const row = document.createElement('div');
     row.className = 'drawer-summary-row';
     const lbl = document.createElement('span');
@@ -249,25 +710,77 @@ function renderDrawerActiveSummary() {
     row.appendChild(lbl);
     const wrap = document.createElement('div');
     wrap.className = 'drawer-summary-chips';
-    items.forEach(({ text, color }) => {
+    if (!sets.length) {
       const chip = document.createElement('span');
       chip.className = 'drawer-summary-chip';
-      if (color) {
+      chip.textContent = '无';
+      wrap.appendChild(chip);
+    } else {
+      sets.forEach((set) => {
+        const chip = document.createElement('span');
+        chip.className = 'drawer-summary-chip';
         const dot = document.createElement('span');
         dot.className = 'color-dot';
-        dot.style.background = escapeHTML(color);
+        dot.style.background = escapeHTML(set.color);
         chip.appendChild(dot);
-      }
-      chip.appendChild(document.createTextNode(text));
-      wrap.appendChild(chip);
-    });
+        chip.appendChild(document.createTextNode(set.name));
+        wrap.appendChild(chip);
+      });
+    }
     row.appendChild(wrap);
     frag.appendChild(row);
-  }
+  };
 
-  addGroup('窗口', state.allowedWindows.map((w) => ({ text: w.label || w.initialTitle || w.processName || '未命名窗口' })));
-  addGroup('分类', state.allowedCategories.map((c) => ({ text: c.name, color: c.color })));
+  addGroup('精准', state.preciseRuleSets.filter((set) => set.enabled));
+  addGroup('模糊', state.fuzzyRuleSets.filter((set) => set.enabled));
   container.replaceChildren(frag);
+}
+
+async function refreshOpenWindows() {
+  const container = el('fuzzy-open-windows');
+  if (!container) return;
+  try {
+    const windows = await api.listOpenWindows();
+    const empty = el('fuzzy-open-windows-empty');
+    setEmptyVisible(empty, windows.length === 0);
+    const frag = document.createDocumentFragment();
+    windows.slice(0, 40).forEach((window, index) => {
+      const row = document.createElement('div');
+      row.className = 'rule-row';
+      row.style.setProperty('--i', index);
+      row.innerHTML = `<div class="rule-main"><strong>${escapeHTML(window.title || window.processName || '未命名窗口')}</strong><p class="muted small">${escapeHTML(window.processPath || '')}</p></div>`;
+      const actions = document.createElement('div');
+      actions.className = 'rule-actions';
+      const suggestions = [];
+      const proc = (window.processName || '').replace(/\.exe$/i, '');
+      if (proc) suggestions.push(proc);
+      const titleFragment = (window.title || '').split(/[-–|·]/)[0]?.trim();
+      if (titleFragment && titleFragment !== proc && titleFragment.length <= 30) suggestions.push(titleFragment);
+      suggestions.slice(0, 2).forEach((text) => {
+        const btn = document.createElement('button');
+        btn.className = 'btn small ghost';
+        btn.textContent = `+ ${text}`;
+        btn.addEventListener('click', () => addFuzzyFromWindow(text));
+        actions.appendChild(btn);
+      });
+      row.appendChild(actions);
+      frag.appendChild(row);
+    });
+    container.replaceChildren(frag);
+  } catch (error) {
+    showToast(error.message || '读取窗口失败', 'danger');
+  }
+}
+
+function addFuzzyFromWindow(text) {
+  if (!state.fuzzyRuleSets.length) {
+    showToast('请先新建一个模糊规则集');
+    openRulesetEditor('fuzzy', null);
+    return;
+  }
+  const target = state.fuzzyRuleSets.find((set) => set.enabled) || state.fuzzyRuleSets[0];
+  addFuzzyPhrase(target.id, text, 'text');
+  showToast(`已加入「${target.name}」：${text}`);
 }
 
 function updateHeroIdleTimer() {
@@ -291,49 +804,49 @@ function renderFocusView() {
   const status = state.session?.status || 'idle';
   const headings = { idle: '准备专注', running: '专注中...', completed: '专注完成', cancelled: '专注结束' };
   el('main-heading').textContent = headings[status] || '准备专注';
-  el('compact-main-heading').textContent = headings[status] || '准备专注';
+  document.body.classList.toggle('focus-mode', status === 'running');
   el('live-context-panel').classList.toggle('hidden', status !== 'running');
   el('violations-panel').classList.toggle('hidden', status === 'idle');
-  el('edit-rules-btn').classList.toggle('hidden', status === 'running');
-  el('compact-context-card').classList.toggle('hidden', status === 'running');
+  el('edit-rules-btn').classList.toggle('hidden', status !== 'idle');
   renderCompactRuleSummary();
 }
 
 function renderCompactRuleSummary() {
   const parts = summarizeRules();
-  const hasRules = !!(state.allowedWindows.length || state.allowedCategories.length);
+  const preciseSets = state.preciseRuleSets.filter((set) => set.enabled);
+  const fuzzySets = state.fuzzyRuleSets.filter((set) => set.enabled);
+  const hasRules = enabledPreciseItems().length > 0 || enabledFuzzyPhrases().length > 0;
   const summaryText = hasRules ? parts.join(' · ') : '尚未配置规则';
 
   const chips = el('rule-summary-chips');
-  const currentHash = state.allowedWindows.length + '|' + state.allowedCategories.length;
+  const currentHash = preciseSets.map((set) => `${set.id}:${set.name}`).join(',') + '|' + fuzzySets.map((set) => `${set.id}:${set.name}`).join(',');
   if (chips.dataset.rulesHash !== currentHash) {
     el('rule-summary-text').textContent = summaryText;
-    el('compact-rule-summary').textContent = summaryText;
 
     const frag = document.createDocumentFragment();
-    state.allowedWindows.forEach((w) => {
-      frag.appendChild(makeChip(w.label || w.processName || '未命名窗口'));
+    preciseSets.forEach((set) => {
+      frag.appendChild(makeChip(set.name, { color: set.color }));
     });
-    state.allowedCategories.forEach((c) => {
-      frag.appendChild(makeChip(c.name, { category: true, color: c.color }));
+    fuzzySets.forEach((set) => {
+      frag.appendChild(makeChip(set.name, { category: true, color: set.color }));
     });
     chips.replaceChildren(frag);
     chips.dataset.rulesHash = currentHash;
   }
 
   const startBtn = el('start-session-btn');
-  if (startBtn) startBtn.disabled = !hasRules;
+  if (startBtn) updateStartButton();
   const hint = el('hero-rules-hint');
   if (hint) hint.classList.toggle('hidden', hasRules);
   renderSessionModeSwitch();
 }
 
 function renderDraftSummary() {
-  el('draft-window-count').textContent = String(state.allowedWindows.length);
-  el('draft-category-count').textContent = String(state.allowedCategories.length);
+  const preciseCount = enabledPreciseItems().length;
+  const fuzzyCount = enabledFuzzyPhrases().length;
+  el('draft-precise-count').textContent = String(preciseCount);
+  el('draft-fuzzy-count').textContent = String(fuzzyCount);
   el('draft-system-safelist').textContent = state.settings?.systemSafelistEnabled === false ? '关' : '开';
-  el('compact-draft-window-count').textContent = String(state.allowedWindows.length);
-  el('compact-draft-category-count').textContent = String(state.allowedCategories.length);
 }
 
 function renderContext(context) {
@@ -342,23 +855,15 @@ function renderContext(context) {
   const title = current.title || '等待检测';
   const meta = formatContextMeta(current);
   const detail = formatContextDetail(current);
-  const kind = formatContextKind(current);
-  el('context-title').textContent = title;
-  el('context-meta').textContent = meta;
-  el('context-detail').textContent = detail;
   el('live-context-title').textContent = title;
   el('live-context-meta').textContent = meta;
   el('live-context-detail').textContent = detail;
-  el('compact-context-title').textContent = title;
-  el('compact-context-meta').textContent = meta;
-  el('compact-context-detail').textContent = detail;
-  el('compact-context-kind').textContent = kind;
   el('context-json').textContent = JSON.stringify(current, null, 2);
 }
 
 function makeChip(label, options = {}) {
   const chip = document.createElement('div');
-  chip.className = `chip ${options.category ? 'category-chip' : ''}`.trim();
+  chip.className = `chip ${options.category ? 'category-chip' : ''} ${options.color ? 'has-color' : ''}`.trim();
   if (options.color) {
     chip.style.setProperty('--chip-color', options.color);
   }
@@ -372,66 +877,6 @@ function makeChip(label, options = {}) {
     chip.appendChild(btn);
   }
   return chip;
-}
-
-function renderAllowedLists() {
-  const windowsList = el('windows-list');
-  const categoriesList = el('selected-categories-list');
-  el('windows-empty').style.display = state.allowedWindows.length ? 'none' : 'block';
-  el('selected-categories-empty').style.display = state.allowedCategories.length ? 'none' : 'block';
-
-  const wFrag = document.createDocumentFragment();
-  state.allowedWindows.forEach((item) => wFrag.appendChild(makeChip(item.label || item.initialTitle || item.processName || '未命名窗口', {
-    onRemove: () => {
-      state.allowedWindows = state.allowedWindows.filter((row) => row.id !== item.id);
-      renderAllowedLists();
-    },
-  })));
-  windowsList.replaceChildren(wFrag);
-
-  const cFrag = document.createDocumentFragment();
-  state.allowedCategories.forEach((item) => cFrag.appendChild(makeChip(`${item.name} · ${item.pattern}`, {
-    category: true,
-    color: item.color,
-    onRemove: () => toggleCategorySelection(item.id),
-  })));
-  categoriesList.replaceChildren(cFrag);
-
-  persistLastRules();
-  renderDraftSummary();
-  renderCompactRuleSummary();
-  renderDrawerActiveSummary();
-}
-
-function renderCategoryRules() {
-  const list = el('category-rule-list');
-  const frag = document.createDocumentFragment();
-  state.categoryRules.forEach((rule) => {
-    const selected = state.allowedCategories.some((item) => item.id === rule.id);
-    const row = document.createElement('div');
-    row.className = 'rule-row';
-    row.dataset.categoryRuleId = rule.id;
-    row.innerHTML = `
-      <div class="rule-main">
-        <div><span class="color-dot" style="background:${escapeHTML(rule.color)}"></span><strong>${escapeHTML(rule.name)}</strong></div>
-        <p class="muted small">Rule: ${escapeHTML(rule.pattern) || '—'}</p>
-      </div>
-      <div class="rule-actions">
-        <button class="btn small ${selected ? 'ghost' : 'primary'}" data-action="toggle">${selected ? '移出' : '加入'}</button>
-        <button class="btn small ghost" data-action="edit">编辑</button>
-        <button class="btn small ghost" data-action="delete">删除</button>
-      </div>
-    `;
-    row.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleCategorySelection(rule.id));
-    row.querySelector('[data-action="edit"]').addEventListener('click', () => fillCategoryEditor(rule));
-    row.querySelector('[data-action="delete"]').addEventListener('click', () => removeCategoryRule(rule.id));
-    frag.appendChild(row);
-  });
-  list.replaceChildren(frag);
-  if (state.lastCategoryRuleAnchorId) {
-    requestAnimationFrame(() => scrollCategoryRuleIntoView(state.lastCategoryRuleAnchorId));
-    state.lastCategoryRuleAnchorId = null;
-  }
 }
 
 function renderSystemSafelist(rules = []) {
@@ -454,6 +899,99 @@ function renderSystemSafelist(rules = []) {
   list.replaceChildren(frag);
 }
 
+function splitPatterns(text) {
+  return String(text || '')
+    .split('|')
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function renderUserSafelist(rules = []) {
+  const list = el('user-safelist-list');
+  if (!list) return;
+  const empty = el('user-safelist-empty');
+  if (empty) setEmptyVisible(empty, rules.length === 0);
+
+  const frag = document.createDocumentFragment();
+  rules.forEach((rule) => {
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    row.dataset.userSafelistId = rule.id;
+    row.innerHTML = `
+      <div class="rule-main">
+        <h4>${escapeHTML(rule.name)}</h4>
+        <p class="muted small">进程：${escapeHTML((rule.processPatterns || []).join(' | ')) || '—'}</p>
+        <p class="muted small">标题：${escapeHTML((rule.titlePatterns || []).join(' | ')) || '—'}</p>
+      </div>
+      <div class="rule-actions">
+        <button class="btn small ghost" data-action="edit">编辑</button>
+        <button class="btn small ghost" data-action="delete">删除</button>
+      </div>
+    `;
+    row.querySelector('[data-action="edit"]').addEventListener('click', () => openUserWhitelistModal({ rule }));
+    row.querySelector('[data-action="delete"]').addEventListener('click', () => removeUserSafelistRule(rule.id));
+    frag.appendChild(row);
+  });
+  list.replaceChildren(frag);
+}
+
+async function persistUserSafelistRules(rules, tip) {
+  try {
+    state.settings = await api.saveSettings({ userSafelistRules: rules });
+    renderUserSafelist(state.settings.userSafelistRules || []);
+    if (tip) showToast(tip);
+  } catch (error) {
+    showToast(error.message || '保存用户白名单失败', 'danger');
+  }
+}
+
+function openUserWhitelistModal({ rule = null, violation = null } = {}) {
+  const overlay = el('whitelist-rule-overlay');
+  if (!overlay) return;
+  el('whitelist-name-input').value = rule?.name || violation?.processName || violation?.title || '';
+  el('whitelist-process-input').value = (rule?.processPatterns || []).join('|')
+    || (violation ? (violation.processPath || violation.processName || '') : '');
+  el('whitelist-title-input').value = (rule?.titlePatterns || []).join('|') || '';
+  el('whitelist-error').classList.add('hidden');
+  state.editingWhitelistRuleId = rule?.id || null;
+  overlay.classList.remove('hidden');
+  el('whitelist-name-input').focus();
+}
+
+function closeUserWhitelistModal() {
+  el('whitelist-rule-overlay').classList.add('hidden');
+  state.editingWhitelistRuleId = null;
+}
+
+async function saveUserWhitelistModal() {
+  const name = el('whitelist-name-input').value.trim();
+  const processPatterns = splitPatterns(el('whitelist-process-input').value);
+  const titlePatterns = splitPatterns(el('whitelist-title-input').value);
+  if (!processPatterns.length && !titlePatterns.length) {
+    el('whitelist-error').classList.remove('hidden');
+    return;
+  }
+
+  const existing = Array.isArray(state.settings?.userSafelistRules) ? state.settings.userSafelistRules : [];
+  const list = existing.map((rule) => ({ ...rule }));
+  if (state.editingWhitelistRuleId) {
+    const index = list.findIndex((rule) => rule.id === state.editingWhitelistRuleId);
+    if (index >= 0) {
+      list[index] = { ...list[index], name: name || list[index].name, processPatterns, titlePatterns };
+    }
+  } else {
+    list.push(createUserSafelistRule({ name: name || '未命名白名单', processPatterns, titlePatterns }));
+  }
+
+  await persistUserSafelistRules(list, '用户白名单已保存');
+  closeUserWhitelistModal();
+}
+
+async function removeUserSafelistRule(id) {
+  const list = (state.settings?.userSafelistRules || []).filter((rule) => rule.id !== id);
+  await persistUserSafelistRules(list, '已删除用户白名单规则');
+}
+
 function renderViolations(violations = [], targetId, emptyId) {
   const list = el(targetId);
   const currentHash = violations.length + '-' + (violations[violations.length - 1]?.timestamp || '');
@@ -461,20 +999,26 @@ function renderViolations(violations = [], targetId, emptyId) {
   list.dataset.vHash = currentHash;
 
   const empty = emptyId ? el(emptyId) : null;
-  if (empty) empty.style.display = violations.length ? 'none' : 'block';
+  if (empty) setEmptyVisible(empty, violations.length === 0);
   if (!violations.length && !emptyId) {
     list.innerHTML = '<div class="empty">本轮没有违规。</div>';
     return;
   }
   const frag = document.createDocumentFragment();
-  violations.slice().reverse().forEach((item) => {
+  violations.slice().reverse().forEach((item, index) => {
     const row = document.createElement('div');
     row.className = 'timeline-item';
+    row.style.setProperty('--i', index);
     row.innerHTML = `
       <h4>${escapeHTML(item.title || item.processName || '未知窗口')}</h4>
-      <p class="muted small">${escapeHTML(formatWhen(item.timestamp))} · ${escapeHTML(item.reason || '已拦截')}</p>
+      <p class="muted small">${escapeHTML(formatWhen(item.timestamp))} · ${escapeHTML(item.reason || '发现违规，已尝试拦截')}</p>
       <p class="muted small">${escapeHTML(item.processPath || '无附加信息')}</p>
     `;
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn small ghost';
+    addBtn.textContent = '加入用户白名单';
+    addBtn.addEventListener('click', () => openUserWhitelistModal({ violation: item }));
+    row.appendChild(addBtn);
     frag.appendChild(row);
   });
   list.replaceChildren(frag);
@@ -508,10 +1052,10 @@ function renderFocusState(session) {
     el('running-timer').textContent = session.sessionMode === 'countup'
       ? formatClock(session.elapsedMs)
       : formatTime(session.remainingMs);
-    el('running-subtitle').textContent = `${session.sessionMode === 'countup' ? '正计时中' : '正在守住你这轮允许规则'} · 窗口 ${session.allowedWindows.length} 个，分类 ${session.allowedCategories.length} 条`;
+    el('running-subtitle').textContent = `${session.sessionMode === 'countup' ? '正计时中' : '正在守住你这轮允许规则'} · 精准 ${session.preciseItems.length} 条，模糊 ${session.fuzzyPhrases.length} 条`;
     el('metric-violations').textContent = String(session.violationCount || 0);
-    el('metric-allowed-windows').textContent = String(session.allowedWindows.length || 0);
-    el('metric-allowed-categories').textContent = String(session.allowedCategories.length || 0);
+    el('metric-allowed-windows').textContent = String(session.preciseItems.length || 0);
+    el('metric-allowed-categories').textContent = String(session.fuzzyPhrases.length || 0);
     const latest = (session.violations || []).slice(-1)[0];
     el('latest-violation-title').textContent = latest?.title || latest?.processName || '暂无';
     el('latest-violation-reason').textContent = latest ? `${latest.reason} · ${formatWhen(latest.timestamp)}` : '还没有拦截记录。';
@@ -529,13 +1073,14 @@ function renderFocusState(session) {
   const actualDurationMinutes = Number(summary.actualDurationMinutes ?? summary.durationMinutes ?? 0);
   const plannedDurationMinutes = Number(summary.plannedDurationMinutes ?? 0);
   el('result-title').textContent = session.status === 'completed' ? '本轮专注完成' : '本轮专注已结束';
-  el('result-subtitle').textContent = `${(summary.primaryCategory?.name || '未分类')} / ${(summary.primaryWindow?.label || summary.primaryWindow?.initialTitle || summary.primaryWindow?.processName || '未记录窗口')}`;
+  const planNote = (summary.sessionMode !== 'countup' && plannedDurationMinutes && plannedDurationMinutes !== actualDurationMinutes)
+    ? `计划 ${formatDurationMinutes(plannedDurationMinutes)}`
+    : '';
+  el('result-subtitle').textContent = planNote;
+  el('result-subtitle').classList.toggle('hidden', !planNote);
   el('result-duration').textContent = formatDurationMinutes(actualDurationMinutes);
   el('result-violations').textContent = String(summary.violationCount || 0);
   el('result-reason').textContent = reasonMap[summary.completionReason] || '—';
-  if (summary.sessionMode !== 'countup' && plannedDurationMinutes && plannedDurationMinutes !== actualDurationMinutes) {
-    el('result-subtitle').textContent = `${el('result-subtitle').textContent} · 计划 ${formatDurationMinutes(plannedDurationMinutes)}`;
-  }
   const latest = (summary.violations || []).slice(-1)[0];
   el('latest-violation-title').textContent = latest?.title || latest?.processName || '暂无';
   el('latest-violation-reason').textContent = latest ? `${latest.reason} · ${formatWhen(latest.timestamp)}` : '还没有拦截记录。';
@@ -545,23 +1090,23 @@ function renderSummaryLists(summary) {
   const windows = el('result-windows');
   const categories = el('result-categories');
 
-  const currentHash = (summary.allowedWindows?.length || 0) + '|' + (summary.allowedCategories?.length || 0);
+  const currentHash = (summary.preciseItems?.length || 0) + '|' + (summary.fuzzyPhrases?.length || 0);
   if (windows.dataset.sHash === currentHash) return;
   windows.dataset.sHash = currentHash;
-  
-  if (!(summary.allowedWindows || []).length) {
-    windows.innerHTML = '<div class="empty">没有窗口规则</div>';
+
+  if (!(summary.preciseItems || []).length) {
+    windows.innerHTML = '<div class="empty">没有精准条目</div>';
   } else {
     const wFrag = document.createDocumentFragment();
-    summary.allowedWindows.forEach((item) => wFrag.appendChild(makeChip(item.label || item.initialTitle || item.processName || '未命名窗口')));
+    summary.preciseItems.forEach((item) => wFrag.appendChild(makeChip(item.label || item.title || item.processName || '未命名条目', { color: item.setColor })));
     windows.replaceChildren(wFrag);
   }
 
-  if (!(summary.allowedCategories || []).length) {
-    categories.innerHTML = '<div class="empty">没有分类规则</div>';
+  if (!(summary.fuzzyPhrases || []).length) {
+    categories.innerHTML = '<div class="empty">没有模糊短语</div>';
   } else {
     const cFrag = document.createDocumentFragment();
-    summary.allowedCategories.forEach((item) => cFrag.appendChild(makeChip(item.name, { category: true, color: item.color })));
+    summary.fuzzyPhrases.forEach((item) => cFrag.appendChild(makeChip(item.text, { category: true, color: item.setColor })));
     categories.replaceChildren(cFrag);
   }
 }
@@ -576,96 +1121,48 @@ function renderSession(session) {
   renderViolations(session.violations || [], 'violations-list', 'violations-empty');
   renderViolations(session.violations || (session.summary?.violations) || [], 'violations-result-list', 'violations-result-empty');
   renderSummaryLists(session.summary || {
-    allowedWindows: session.allowedWindows,
-    allowedCategories: session.allowedCategories,
+    preciseItems: session.preciseItems,
+    fuzzyPhrases: session.fuzzyPhrases,
   });
   renderFocusView();
 }
-function fillCategoryEditor(rule) {
-  el('category-name-input').value = rule.name || '';
-  el('category-pattern-input').value = rule.pattern || '';
-  el('category-color-input').value = rule.color || '#a78bfa';
-  el('save-category-btn').dataset.editingId = rule.id;
-  scrollCategoryEditorIntoView();
-  showToast(`正在编辑分类：${rule.name}`);
-}
-
-function resetCategoryEditor() {
-  el('category-name-input').value = '';
-  el('category-pattern-input').value = '';
-  el('category-color-input').value = '#e2ebd7';
-  delete el('save-category-btn').dataset.editingId;
-}
-
-function upsertCategoryRule() {
-  const name = el('category-name-input').value.trim();
-  const pattern = el('category-pattern-input').value.trim();
-  const color = el('category-color-input').value;
-  if (!name || !pattern) {
-    showToast('分类名和 pattern 都不能为空', 'danger');
-    return;
-  }
-
-  const editingId = el('save-category-btn').dataset.editingId;
-  if (editingId) {
-    state.categoryRules = state.categoryRules.map((rule) => rule.id === editingId ? { ...rule, name, pattern, color } : rule);
-    state.allowedCategories = state.allowedCategories.map((rule) => rule.id === editingId ? { ...rule, name, pattern, color } : rule);
-    state.lastCategoryRuleAnchorId = editingId;
-    showToast(`已更新分类：${name}`);
+function renderHelperStatus() {
+  const statusEl = el('admin-helper-status');
+  if (!statusEl) return;
+  if (state.helperStatus === 'ready') {
+    statusEl.textContent = '管理员拦截：已开启（helper 就绪）';
+  } else if (state.helperStatus === 'launching') {
+    statusEl.textContent = '管理员拦截：正在请求授权…';
+  } else if (state.helperStatus === 'missing') {
+    statusEl.textContent = '管理员拦截：开启失败（未获管理员授权）';
   } else {
-    const createdId = `category-${Date.now()}`;
-    state.categoryRules = [...state.categoryRules, {
-      id: createdId,
-      name,
-      pattern,
-      color,
-      enabled: true,
-      createdAt: new Date().toISOString(),
-    }];
-    state.lastCategoryRuleAnchorId = createdId;
-    showToast(`已新增分类：${name}`);
+    statusEl.textContent = '管理员拦截：关';
   }
-
-  persistCategoryRules();
-  reconcileAllowedCategories();
-  resetCategoryEditor();
-  renderCategoryRules();
-  renderAllowedLists();
 }
 
-function removeCategoryRule(id) {
-  const target = state.categoryRules.find((rule) => rule.id === id);
-  state.categoryRules = state.categoryRules.filter((rule) => rule.id !== id);
-  state.allowedCategories = state.allowedCategories.filter((rule) => rule.id !== id);
-  persistCategoryRules();
-  renderCategoryRules();
-  renderAllowedLists();
-  showToast(`已删除分类：${target?.name || '未命名分类'}`);
-}
-
-function toggleCategorySelection(id) {
-  const existing = state.allowedCategories.find((rule) => rule.id === id);
-  if (existing) {
-    state.allowedCategories = state.allowedCategories.filter((rule) => rule.id !== id);
-  } else {
-    const source = state.categoryRules.find((rule) => rule.id === id);
-    if (!source) return;
-    state.allowedCategories = [...state.allowedCategories, clone(source)];
+async function refreshHelperStatus() {
+  try {
+    const payload = await api.getHelperStatus();
+    state.helperStatus = payload?.status || 'off';
+  } catch {
+    state.helperStatus = 'off';
   }
-  renderCategoryRules();
-  renderAllowedLists();
+  renderHelperStatus();
 }
 
-function restoreDefaultCategories() {
-  state.categoryRules = clone(DEFAULT_CATEGORY_RULES);
-  const validIds = new Set(state.categoryRules.map((item) => item.id));
-  state.allowedCategories = state.allowedCategories.filter((item) => validIds.has(item.id));
-  reconcileAllowedCategories();
-  persistCategoryRules();
-  resetCategoryEditor();
-  renderCategoryRules();
-  renderAllowedLists();
-  showToast('已恢复默认分类');
+function renderAdminInterceptSettings() {
+  const promptInput = el('admin-intercept-prompt-input');
+  const enabledInput = el('admin-intercept-enabled-input');
+  const disabledHint = el('admin-intercept-disabled-hint');
+  if (!promptInput || !enabledInput) return;
+
+  const showPrompt = state.settings?.adminInterceptPrompt !== false;
+  promptInput.checked = !showPrompt;
+  enabledInput.checked = state.settings?.adminIntercept === 'on';
+  enabledInput.disabled = showPrompt;
+  if (disabledHint) disabledHint.classList.toggle('hidden', !showPrompt);
+
+  renderHelperStatus();
 }
 
 async function loadSettings() {
@@ -678,6 +1175,9 @@ async function loadSettings() {
   el('exit-difficulty-input').value = state.settings.exitDifficulty || 'easy';
   state.exitDifficulty = state.settings.exitDifficulty || 'easy';
   renderSystemSafelist(state.settings.systemSafelistRules || []);
+  renderUserSafelist(state.settings.userSafelistRules || []);
+  await refreshHelperStatus();
+  renderAdminInterceptSettings();
   renderDraftSummary();
 }
 
@@ -693,6 +1193,7 @@ async function saveSettings() {
   state.settings = await api.saveSettings(patch);
   state.exitDifficulty = state.settings.exitDifficulty || 'easy';
   renderSystemSafelist(state.settings.systemSafelistRules || []);
+  renderAdminInterceptSettings();
   renderDraftSummary();
   showToast('设置已保存');
   await refreshHistoryFiles();
@@ -705,7 +1206,7 @@ async function refreshHistoryFiles() {
     state.selectedHistoryFile = null;
   }
   const list = el('history-files-list');
-  el('history-files-empty').style.display = state.historyFiles.length ? 'none' : 'block';
+  setEmptyVisible(el('history-files-empty'), state.historyFiles.length === 0);
   const frag = document.createDocumentFragment();
   state.historyFiles.forEach((file) => {
     const row = document.createElement('div');
@@ -785,7 +1286,7 @@ function renderDashboardSummary(days = []) {
   el('dashboard-total-violations').textContent = String(totalViolations);
 
   const list = el('dashboard-days-list');
-  el('dashboard-days-empty').style.display = days.length ? 'none' : 'block';
+  setEmptyVisible(el('dashboard-days-empty'), days.length === 0);
   const frag = document.createDocumentFragment();
   days.forEach((day) => {
     const row = document.createElement('div');
@@ -889,13 +1390,6 @@ async function refreshInitialState() {
     return;
   }
 
-  const lastRules = loadLastRules();
-  if (lastRules) {
-    state.allowedWindows = lastRules.allowedWindows || [];
-    state.allowedCategories = lastRules.allowedCategories || [];
-    reconcileAllowedCategories();
-  }
-
   try {
     const [session, context] = await Promise.all([api.getState(), api.getCurrentContext()]);
     if (session?.status === 'running') {
@@ -903,8 +1397,9 @@ async function refreshInitialState() {
     }
     renderSession(session);
     renderContext(context);
-    renderAllowedLists();
-    renderCategoryRules();
+    renderPreciseRuleSets();
+    renderFuzzyRuleSets();
+    renderRulesSummary();
     await loadSettings();
     await refreshHistoryFiles();
   } catch (error) {
@@ -913,52 +1408,136 @@ async function refreshInitialState() {
   }
 }
 
-async function handleCaptureWindow() {
-  try {
-    const payload = await api.captureCurrentWindow();
-    const allowance = payload.allowance;
-    if (state.allowedWindows.some((item) => item.windowId === allowance.windowId)) {
-      showToast('这个窗口已经在允许列表里了');
-      return;
-    }
-    state.allowedWindows.push(allowance);
-    renderAllowedLists();
-    renderContext(payload.context);
-    showToast(`已加入：${allowance.label}`);
-  } catch (error) {
-    showToast(error.message || '加入窗口失败', 'danger');
-  }
+function getRequestedDurationMinutes() {
+  return state.sessionMode === 'countup'
+    ? 0
+    : Number(el('duration-minutes').value || 25);
 }
 
-async function handleStartSession() {
-  const durationMinutes = state.sessionMode === 'countdown'
-    ? Number(el('duration-minutes').value || 25)
-    : 0;
-  if (!state.allowedWindows.length && !state.allowedCategories.length) {
-    showToast('至少要有一个允许窗口或分类', 'danger');
-    return;
-  }
+function hasEnabledRules() {
+  return enabledPreciseItems().length > 0 || enabledFuzzyPhrases().length > 0;
+}
 
+function updateStartButton() {
+  const btn = el('start-session-btn');
+  if (!btn) return;
+  btn.disabled = state.starting || !hasEnabledRules();
+}
+
+function setStarting(value) {
+  state.starting = value;
+  updateStartButton();
+  el('start-lock-overlay')?.classList.toggle('hidden', !value);
+  document.body.classList.toggle('is-starting', value);
+}
+
+async function beginSession({ durationMinutes, useAdminIntercept = false }) {
+  setStarting(true);
   try {
-    persistLastRules();
     const session = await api.startSession({
       sessionMode: state.sessionMode,
       durationMinutes,
-      allowedWindows: state.allowedWindows,
-      allowedCategories: state.allowedCategories,
+      preciseItems: enabledPreciseItems(),
+      fuzzyPhrases: enabledFuzzyPhrases(),
       exitProtection: { type: 'typing' },
+      useAdminIntercept,
     });
     renderSession(session);
     showToast('专注已开始');
   } catch (error) {
     showToast(error.message || '开始专注失败', 'danger');
+  } finally {
+    setStarting(false);
   }
+}
+
+async function requestElevation() {
+  if (state.helperStatus === 'ready') {
+    return true;
+  }
+  state.helperStatus = 'launching';
+  renderHelperStatus();
+  showToast('正在请求管理员授权…');
+  try {
+    const result = await api.startHelper();
+    state.helperStatus = result?.status || 'missing';
+  } catch {
+    state.helperStatus = 'missing';
+  }
+  renderHelperStatus();
+  if (state.helperStatus !== 'ready') {
+    showToast('未获得管理员授权，已取消本轮启动', 'danger');
+    return false;
+  }
+  return true;
+}
+
+async function handleStartSession() {
+  if (state.starting) {
+    return;
+  }
+
+  const durationMinutes = getRequestedDurationMinutes();
+  if (!hasEnabledRules()) {
+    showToast('请至少启用一个规则集并添加条目', 'danger');
+    return;
+  }
+
+  const settings = state.settings || {};
+  const promptSuppressed = settings.adminInterceptPrompt === false;
+
+  if (promptSuppressed) {
+    if (settings.adminIntercept === 'on') {
+      setStarting(true);
+      if (!(await requestElevation())) {
+        setStarting(false);
+        return;
+      }
+      await beginSession({ durationMinutes, useAdminIntercept: true });
+      return;
+    }
+    await beginSession({ durationMinutes, useAdminIntercept: false });
+    return;
+  }
+
+  state.pendingAdminStart = { durationMinutes };
+  el('admin-intercept-remember-input').checked = false;
+  setStarting(true);
+  el('admin-intercept-overlay').classList.remove('hidden');
+}
+
+async function resolveAdminPrompt(enable) {
+  const remember = el('admin-intercept-remember-input').checked;
+  el('admin-intercept-overlay').classList.add('hidden');
+  const durationMinutes = state.pendingAdminStart?.durationMinutes ?? getRequestedDurationMinutes();
+  state.pendingAdminStart = null;
+
+  if (remember) {
+    state.settings = await api.saveSettings({
+      adminIntercept: enable ? 'on' : 'off',
+      adminInterceptPrompt: false,
+    });
+    renderAdminInterceptSettings();
+  }
+
+  if (enable) {
+    setStarting(true);
+    if (!(await requestElevation())) {
+      setStarting(false);
+      return;
+    }
+    await beginSession({ durationMinutes, useAdminIntercept: true });
+    return;
+  }
+
+  await beginSession({ durationMinutes, useAdminIntercept: false });
 }
 
 async function stopSession() {
   try {
     const session = await api.endSession({ reason: 'cancelled' });
     renderSession(session);
+    await api.stopHelper();
     await refreshHistoryFiles();
     showToast('已结束本轮专注');
   } catch (error) {
@@ -975,8 +1554,9 @@ async function backToRules() {
     state.sessionMode = summary.sessionMode || state.sessionMode || 'countdown';
     updateHeroIdleTimer();
     renderSessionModeSwitch();
-    renderAllowedLists();
-    renderCategoryRules();
+    renderPreciseRuleSets();
+    renderFuzzyRuleSets();
+    renderRulesSummary();
     showToast('规则已保留，可以开始新专注');
   } catch (error) {
     console.error(error);
@@ -1067,21 +1647,12 @@ function bindEvents() {
     openDrawer('dashboard');
     refreshDashboard(false);
   });
-  el('compact-open-dashboard-btn').addEventListener('click', () => {
-    openDrawer('dashboard');
-    refreshDashboard(false);
-  });
   el('open-history-btn').addEventListener('click', () => {
-    openDrawer('history');
-    refreshHistoryFiles();
-  });
-  el('compact-open-history-btn').addEventListener('click', () => {
     openDrawer('history');
     refreshHistoryFiles();
   });
   el('close-history-drawer').addEventListener('click', () => closeDrawer('history'));
   el('open-settings-btn').addEventListener('click', () => openDrawer('settings'));
-  el('compact-open-settings-btn').addEventListener('click', () => openDrawer('settings'));
   el('close-settings-drawer').addEventListener('click', () => closeDrawer('settings'));
   el('close-dashboard-drawer').addEventListener('click', () => closeDrawer('dashboard'));
 
@@ -1093,6 +1664,10 @@ function bindEvents() {
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (!el('ruleset-editor-overlay').classList.contains('hidden')) {
+        closeRulesetEditor();
+        return;
+      }
       ['rules', 'history', 'settings', 'dashboard'].forEach((name) => {
         if (!el(`${name}-drawer-overlay`).classList.contains('hidden')) closeDrawer(name);
       });
@@ -1103,9 +1678,31 @@ function bindEvents() {
     btn.addEventListener('click', () => switchRulesTab(btn.dataset.tab));
   });
 
-  el('capture-window-btn').addEventListener('click', handleCaptureWindow);
-  el('save-category-btn').addEventListener('click', upsertCategoryRule);
-  el('restore-default-categories-btn').addEventListener('click', restoreDefaultCategories);
+  el('candidate-add-btn')?.addEventListener('click', addPreciseFromCandidate);
+  document.querySelectorAll('#candidate-type-switch .mode-switch-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.candidateType = btn.dataset.type === 'process' ? 'process' : 'window';
+      renderCandidateTypeSwitch();
+      if (state.candidate) {
+        el('candidate-rule-preview').textContent = describeCandidateItem(state.candidate, state.candidateType);
+      }
+    });
+  });
+  el('precise-manual-add-btn')?.addEventListener('click', addPreciseManual);
+  el('precise-manual-input')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') addPreciseManual();
+  });
+  el('precise-add-set-btn')?.addEventListener('click', () => openRulesetEditor('precise', null));
+  el('fuzzy-add-set-btn')?.addEventListener('click', () => openRulesetEditor('fuzzy', null));
+  el('refresh-open-windows-btn')?.addEventListener('click', refreshOpenWindows);
+  el('ruleset-editor-cancel-btn')?.addEventListener('click', closeRulesetEditor);
+  el('ruleset-editor-save-btn')?.addEventListener('click', saveRulesetEditor);
+  el('ruleset-color-input')?.addEventListener('input', (event) => {
+    el('ruleset-color-hex').textContent = event.target.value;
+  });
+  el('ruleset-editor-overlay')?.addEventListener('click', (event) => {
+    if (event.target === el('ruleset-editor-overlay')) closeRulesetEditor();
+  });
 
   el('start-session-btn').addEventListener('click', handleStartSession);
   el('back-to-rules-btn').addEventListener('click', backToRules);
@@ -1128,6 +1725,28 @@ function bindEvents() {
 
   el('save-settings-btn').addEventListener('click', saveSettings);
 
+  el('add-user-safelist-btn')?.addEventListener('click', () => openUserWhitelistModal());
+  el('whitelist-cancel-btn')?.addEventListener('click', closeUserWhitelistModal);
+  el('whitelist-save-btn')?.addEventListener('click', saveUserWhitelistModal);
+  el('whitelist-rule-overlay')?.addEventListener('click', (event) => {
+    if (event.target === el('whitelist-rule-overlay')) closeUserWhitelistModal();
+  });
+  el('admin-intercept-no-btn')?.addEventListener('click', () => resolveAdminPrompt(false));
+  el('admin-intercept-yes-btn')?.addEventListener('click', () => resolveAdminPrompt(true));
+  el('admin-intercept-prompt-input')?.addEventListener('change', async (event) => {
+    state.settings = await api.saveSettings({ adminInterceptPrompt: !event.target.checked });
+    renderAdminInterceptSettings();
+  });
+  el('admin-intercept-enabled-input')?.addEventListener('change', async (event) => {
+    state.settings = await api.saveSettings({ adminIntercept: event.target.checked ? 'on' : 'off' });
+    renderAdminInterceptSettings();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !el('whitelist-rule-overlay')?.classList.contains('hidden')) {
+      closeUserWhitelistModal();
+    }
+  });
+
   el('exit-challenge-btn').addEventListener('click', showExitChallenge);
   el('challenge-cancel-btn').addEventListener('click', hideExitChallenge);
   el('challenge-confirm-btn').addEventListener('click', confirmExitChallenge);
@@ -1138,37 +1757,9 @@ function bindEvents() {
   if (!api) return;
   api.subscribeState(async (session) => {
     const previousStatus = state.session?.status;
-    
-    if (previousStatus === 'running' && (session.status === 'completed' || session.status === 'cancelled')) {
-      const summary = session.summary || {};
-      const manuallyAddedWindows = summary.allowedWindows || [];
-      if (manuallyAddedWindows.length > 0) {
-        let tempCat = state.categoryRules.find(c => c.name.toLowerCase() === 'temp');
-        if (!tempCat) {
-          tempCat = { id: `category-temp-${Date.now()}`, name: 'temp', color: '#94a3b8', pattern: '', enabled: true, createdAt: new Date().toISOString() };
-          state.categoryRules.push(tempCat);
-        }
-        
-        let existingPatterns = tempCat.pattern ? tempCat.pattern.split('|').map(s => s.trim()) : [];
-        const newPatterns = manuallyAddedWindows.map(w => (w.processName || '').replace(/\.exe$/i, '') || w.initialTitle).filter(Boolean);
-        tempCat.pattern = Array.from(new Set([...existingPatterns, ...newPatterns])).filter(Boolean).join('|');
-        
-        state.categoryRules = state.categoryRules.map(c => c.id === tempCat.id ? tempCat : c);
-        
-        if (!state.allowedCategories.some(c => c.id === tempCat.id)) {
-          state.allowedCategories.push(clone(tempCat));
-        } else {
-          state.allowedCategories = state.allowedCategories.map(c => c.id === tempCat.id ? clone(tempCat) : c);
-        }
-        
-        state.allowedWindows = [];
-        persistCategoryRules();
-        persistLastRules();
-        renderCategoryRules();
-        renderAllowedLists();
-        showToast('专注结束，已将刚才添加的窗口保存至 temp 分类', 'normal');
-      }
 
+    if (previousStatus === 'running' && (session.status === 'completed' || session.status === 'cancelled')) {
+      void api.stopHelper();
       await refreshHistoryFiles();
       if (!el('dashboard-drawer-overlay').classList.contains('hidden')) {
         await refreshDashboard();
@@ -1178,7 +1769,12 @@ function bindEvents() {
     renderSession(session);
   });
   api.subscribeViolation((violation) => {
-    showToast(`已拦截：${violation.title || violation.processName || '未知窗口'}`, 'danger');
+    const target = violation.title || violation.processName || '未知窗口';
+    showToast(`发现违规：${target}（已尝试拦截）`, 'danger');
+  });
+  api.subscribeHelperStatus((payload) => {
+    state.helperStatus = payload?.status || 'off';
+    renderHelperStatus();
   });
 }
 
