@@ -1,3 +1,6 @@
+export const MAX_RULE_SET_ITEMS = 50;
+export const MAX_RULE_SETS = 50;
+
 export function createEmptyActiveContext() {
   return {
     timestamp: new Date().toISOString(),
@@ -22,10 +25,10 @@ export function createInitialSessionState() {
     elapsedMs: 0,
     violationCount: 0,
     violations: [],
-    allowedWindows: [],
-    allowedCategories: [],
+    preciseItems: [],
+    fuzzyPhrases: [],
     systemSafelistEnabled: true,
-    recentAllowedWindow: null,
+    recentPreciseItem: null,
     currentContext: createEmptyActiveContext(),
     exitProtection: {
       type: 'hold',
@@ -85,7 +88,7 @@ export function getDefaultSystemSafelistRules() {
       id: 'system-dialogs',
       name: '文件选择与系统对话框',
       description: '放行常见打开、保存、浏览文件夹、通知和系统对话框。',
-      titlePatterns: ['打开', '另存为', '保存为', '选择文件', '浏览文件夹', '选择文件夹', '通知', '系统托盘溢出窗口'],
+      titlePatterns: ['打开', '另存为', '保存为', '选择文件', '浏览文件夹', '选择文件夹', '系统托盘溢出窗口'],
     }),
     createSystemSafelistRule({
       id: 'system-screenshot',
@@ -97,46 +100,180 @@ export function getDefaultSystemSafelistRules() {
   ];
 }
 
-export function createCategoryRule({
+export function createUserSafelistRule({
   id,
   name,
-  color = '#38bdf8',
-  pattern = '',
+  description = '',
+  processPatterns = [],
+  titlePatterns = [],
   enabled = true,
+  source = 'user',
   createdAt,
 } = {}) {
   return {
-    id: id || `category-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-    name: name || '未命名分类',
-    color,
-    pattern: String(pattern || '').trim(),
-    enabled,
+    id: id || `user-safelist-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name: name || '未命名白名单',
+    description,
+    processPatterns: Array.isArray(processPatterns) ? processPatterns.filter(Boolean) : [],
+    titlePatterns: Array.isArray(titlePatterns) ? titlePatterns.filter(Boolean) : [],
+    enabled: enabled !== false,
+    source: source === 'violation' ? 'violation' : 'user',
     createdAt: createdAt || new Date().toISOString(),
   };
 }
 
-export function getDefaultCategoryRules() {
-  return [
-    createCategoryRule({ id: 'cat-programming', name: 'Programming', color: '#4ade80', pattern: 'Visual Studio Code|PyCharm|WebStorm|vim|Spyder|Ghidra|SciTE|Cursor|electron.exe|Electron' }),
-    createCategoryRule({ id: 'cat-ai', name: 'AI', color: '#a78bfa', pattern: 'WindowsTerminal|PowerShell|cmd|Claude|Codex|Copilot|ChatGPT|Gemini' }),
-    createCategoryRule({ id: 'cat-notes', name: 'Notes', color: '#f472b6', pattern: 'Obsidian|Typora|OneNote|Notion|Logseq' }),
-    createCategoryRule({ id: 'cat-paper', name: 'Paper', color: '#38bdf8', pattern: 'Zotero|Acrobat|SumatraPDF|论文' }),
-    createCategoryRule({ id: 'cat-office', name: 'Office', color: '#fb923c', pattern: 'Word|Excel|PowerPoint|WPS' }),
-    createCategoryRule({ id: 'cat-creative', name: 'Creative', color: '#f43f5e', pattern: 'Photoshop|GIMP|Inkscape|Premiere|剪映|Figma' }),
-    createCategoryRule({ id: 'cat-comms', name: 'Comms', color: '#67e8f9', pattern: '微信|WeChat|QQ|Slack|Teams|Discord|Telegram|飞书|Zoom' }),
-  ];
+export function getDefaultUserSafelistRules() {
+  return [];
 }
 
-export function buildWindowAllowanceFromContext(context) {
+export function normalizeUserSafelistRules(input) {
+  if (!Array.isArray(input)) {
+    return getDefaultUserSafelistRules();
+  }
+
+  return input
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => createUserSafelistRule(item))
+    .filter((rule) => rule.processPatterns.length || rule.titlePatterns.length);
+}
+
+export function createPreciseItem({
+  id,
+  type = 'window',
+  label,
+  processPath = '',
+  processName = '',
+  title = '',
+  windowId = null,
+  createdAt,
+} = {}) {
   return {
-    id: `win-${context.windowId}-${Date.now()}`,
-    label: context.title || context.processName || '未命名窗口',
-    processPath: context.processPath || '',
-    processName: context.processName || '',
-    initialTitle: context.title || '',
-    windowId: context.windowId ?? null,
-    createdAt: new Date().toISOString(),
+    id: id || `precise-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: type === 'process' ? 'process' : 'window',
+    label: label || title || processName || '未命名条目',
+    processPath: String(processPath || ''),
+    processName: String(processName || ''),
+    title: String(title || ''),
+    windowId: windowId ?? null,
+    createdAt: createdAt || new Date().toISOString(),
   };
+}
+
+export function createPreciseRuleSet({
+  id,
+  name,
+  color = '#4ade80',
+  enabled = true,
+  items = [],
+  createdAt,
+} = {}) {
+  return {
+    id: id || `precise-set-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name: name || '未命名精准规则集',
+    color,
+    enabled: enabled !== false,
+    items: (Array.isArray(items) ? items : [])
+      .map((item) => createPreciseItem(item))
+      .filter((item) => item.processPath || item.processName || item.title)
+      .slice(0, MAX_RULE_SET_ITEMS),
+    createdAt: createdAt || new Date().toISOString(),
+  };
+}
+
+export function createFuzzyPhrase({ id, text, mode = 'text', createdAt } = {}) {
+  return {
+    id: id || `phrase-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    text: String(text || '').trim(),
+    mode: mode === 'regex' ? 'regex' : 'text',
+    createdAt: createdAt || new Date().toISOString(),
+  };
+}
+
+export function createFuzzyRuleSet({
+  id,
+  name,
+  color = '#a78bfa',
+  enabled = true,
+  phrases = [],
+  createdAt,
+} = {}) {
+  return {
+    id: id || `fuzzy-set-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name: name || '未命名模糊规则集',
+    color,
+    enabled: enabled !== false,
+    phrases: (Array.isArray(phrases) ? phrases : [])
+      .map((phrase) => createFuzzyPhrase(phrase))
+      .filter((phrase) => phrase.text)
+      .slice(0, MAX_RULE_SET_ITEMS),
+    createdAt: createdAt || new Date().toISOString(),
+  };
+}
+
+export function normalizePreciseRuleSets(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .filter((set) => set && typeof set === 'object')
+    .map((set) => createPreciseRuleSet(set))
+    .filter((set) => set.items.length)
+    .slice(0, MAX_RULE_SETS);
+}
+
+export function normalizeFuzzyRuleSets(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .filter((set) => set && typeof set === 'object')
+    .map((set) => createFuzzyRuleSet(set))
+    .filter((set) => set.phrases.length)
+    .slice(0, MAX_RULE_SETS);
+}
+
+export function buildRuleSetsFromLegacy({ categoryRules = [], lastRules = null } = {}) {
+  const selectedCategoryIds = new Set((lastRules?.allowedCategories || []).map((item) => item?.id));
+  const hasSelection = selectedCategoryIds.size > 0;
+
+  const fuzzyRuleSets = (Array.isArray(categoryRules) ? categoryRules : [])
+    .filter((category) => category && category.name && category.pattern)
+    .map((category) => createFuzzyRuleSet({
+      id: category.id,
+      name: category.name,
+      color: category.color,
+      enabled: hasSelection ? selectedCategoryIds.has(category.id) : true,
+      phrases: String(category.pattern)
+        .split('|')
+        .map((token) => token.trim())
+        .filter(Boolean)
+        .map((text) => createFuzzyPhrase({ text, mode: 'text' })),
+    }))
+    .filter((set) => set.phrases.length);
+
+  const preciseItems = (lastRules?.allowedWindows || [])
+    .filter((item) => item && (item.processPath || item.processName || item.initialTitle))
+    .map((item) => createPreciseItem({
+      id: item.id,
+      type: item.scope === 'process' ? 'process' : 'window',
+      label: item.label || item.initialTitle || item.processName || '未命名窗口',
+      processPath: item.processPath || '',
+      processName: item.processName || '',
+      title: item.initialTitle || item.title || '',
+      windowId: item.windowId ?? null,
+    }));
+
+  const preciseRuleSets = preciseItems.length
+    ? [createPreciseRuleSet({
+      id: 'precise-migrated',
+      name: '已迁移窗口',
+      color: '#38bdf8',
+      enabled: true,
+      items: preciseItems,
+    })]
+    : [];
+
+  return { preciseRuleSets, fuzzyRuleSets };
 }
 
 export function formatRemaining(remainingMs) {
