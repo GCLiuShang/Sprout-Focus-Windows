@@ -2,26 +2,23 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { regenerateHistoryMarkdown, toLocalDateKey } from './history.js';
 import {
-  buildWindowAllowanceFromContext,
   createEmptyActiveContext,
   createInitialSessionState,
+  getDefaultSystemSafelistRules,
 } from '../shared/models.js';
-import { decideContext } from './rules.js';
+import { decideContext, isOwnAppContext } from './rules.js';
+import { isSystemPath } from '../shared/rules-core.js';
 import { WindowsService } from './windows-service.js';
 
 const MONITOR_INTERVAL_MS = 350;
 const CLOCK_INTERVAL_MS = 250;
 const DUPLICATE_VIOLATION_WINDOW_MS = 8000;
-const POST_VIOLATION_CONTEXT_DELAY_MS = 120;
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export class GuardianRuntime {
-  constructor({ send, logger = console }) {
+  constructor({ send, logger = console, minimizer = null }) {
     this.send = send;
     this.logger = logger;
+    this.minimizer = minimizer;
     this.windows = new WindowsService();
     this.state = createInitialSessionState();
     this.monitorTimer = null;
@@ -33,11 +30,14 @@ export class GuardianRuntime {
     this.preferences = {
       autoWriteHistory: true,
       systemSafelistEnabled: true,
+      systemSafelistRules: getDefaultSystemSafelistRules(),
+      userSafelistRules: [],
     };
     this.lastViolation = { signature: '', at: 0 };
+    this.adminInterceptActive = false;
     this.matchStats = {
-      windowHits: {},
-      categoryHits: {},
+      preciseHits: {},
+      fuzzyHits: {},
     };
   }
 
@@ -72,16 +72,16 @@ export class GuardianRuntime {
         return this.resetSession();
       case 'update-preferences':
         return this.updatePreferences(request.payload);
-      case 'capture-current-window':
-        return this.captureCurrentWindow();
       case 'get-current-context':
         return this.resolveCurrentContext();
+      case 'get-candidate-window':
+        return this.getCandidateWindow();
+      case 'list-open-windows':
+        return this.listOpenWindows();
       case 'start-session':
         return this.startSession(request.payload);
       case 'end-session':
         return this.endSession(request.payload?.reason ?? 'cancelled');
-      case 'ping':
-        return { ok: true, now: new Date().toISOString() };
       default:
         throw new Error(`未知 guardian 请求：${request.type}`);
     }
@@ -110,18 +110,18 @@ export class GuardianRuntime {
     };
   }
 
-  async captureCurrentWindow() {
+  getCandidateWindow() {
     const context = this.lastExternalContext?.windowId
       ? structuredClone(this.lastExternalContext)
-      : this.windows.captureSystemContext();
-    if (!context.windowId) {
-      throw new Error('当前没有可加入的活跃窗口');
-    }
+      : this.captureForegroundContext();
+    return { context, isOwnApp: isOwnAppContext(context) };
+  }
 
-    return {
-      allowance: buildWindowAllowanceFromContext(context),
-      context,
-    };
+  listOpenWindows() {
+    return this.windows.listWindows().map((entry) => ({
+      ...entry,
+      isSystem: isSystemPath(entry.processPath),
+    }));
   }
 
   startContextTracking() {
@@ -132,23 +132,13 @@ export class GuardianRuntime {
     this.contextTrackingTimer = setInterval(() => {
       try {
         const ctx = this.windows.captureSystemContext();
-        if (ctx?.windowId && !this.isOwnApp(ctx)) {
+        if (ctx?.windowId && !isOwnAppContext(ctx)) {
           this.lastExternalContext = ctx;
         }
       } catch (error) {
         this.logger.error(error);
       }
     }, 1000);
-  }
-
-  isOwnApp(ctx) {
-    if (ctx?.processId && Number(ctx.processId) === process.pid) {
-      return true;
-    }
-    const processPath = String(ctx?.processPath || '').toLowerCase();
-    const processName = String(ctx?.processName || '').toLowerCase();
-    return processPath.includes('sprout')
-      || (processName === 'electron.exe' && processPath.includes('electron\\dist'));
   }
 
   async resolveCurrentContext() {
@@ -162,33 +152,6 @@ export class GuardianRuntime {
     return this.windows.captureSystemContext() || createEmptyActiveContext();
   }
 
-  async resolvePostViolationContext(previousContext) {
-    const immediate = this.captureForegroundContext();
-    if (this.isStablePostViolationContext(immediate, previousContext)) {
-      return immediate;
-    }
-
-    await delay(POST_VIOLATION_CONTEXT_DELAY_MS);
-    const delayed = this.captureForegroundContext();
-    if (delayed?.windowId) {
-      return delayed;
-    }
-
-    return immediate?.windowId ? immediate : createEmptyActiveContext();
-  }
-
-  isStablePostViolationContext(candidate, previousContext) {
-    if (!candidate?.windowId) {
-      return false;
-    }
-
-    if (!previousContext?.windowId) {
-      return true;
-    }
-
-    return candidate.windowId !== previousContext.windowId;
-  }
-
   async startSession(payload) {
     if (this.state.status === 'running') {
       throw new Error('已有专注会话在运行');
@@ -198,12 +161,13 @@ export class GuardianRuntime {
     const durationMinutes = sessionMode === 'countdown'
       ? Number(payload?.durationMinutes || 25)
       : 0;
-    const allowedWindows = Array.isArray(payload?.allowedWindows) ? payload.allowedWindows : [];
-    const allowedCategories = Array.isArray(payload?.allowedCategories) ? payload.allowedCategories : [];
-    if (!allowedWindows.length && !allowedCategories.length) {
-      throw new Error('至少需要一个允许窗口或允许分类');
+    const preciseItems = Array.isArray(payload?.preciseItems) ? payload.preciseItems : [];
+    const fuzzyPhrases = Array.isArray(payload?.fuzzyPhrases) ? payload.fuzzyPhrases : [];
+    if (!preciseItems.length && !fuzzyPhrases.length) {
+      throw new Error('至少需要一个精准条目或模糊短语');
     }
 
+    this.adminInterceptActive = payload?.useAdminIntercept === true;
     const now = Date.now();
     const endsAt = sessionMode === 'countdown' ? now + durationMinutes * 60_000 : null;
     const currentContext = await this.resolveCurrentContext();
@@ -216,23 +180,23 @@ export class GuardianRuntime {
       durationMinutes,
       remainingMs: sessionMode === 'countdown' ? endsAt - now : 0,
       elapsedMs: 0,
-      allowedWindows,
-      allowedCategories,
+      preciseItems,
+      fuzzyPhrases,
       currentContext,
-      recentAllowedWindow: allowedWindows[0] ?? null,
+      recentPreciseItem: preciseItems[0] ?? null,
       systemSafelistEnabled: this.preferences.systemSafelistEnabled !== false,
       exitProtection: payload?.exitProtection ?? { type: 'hold', holdToExitMs: 3000 },
     };
     this.matchStats = {
-      windowHits: {},
-      categoryHits: {},
+      preciseHits: {},
+      fuzzyHits: {},
     };
 
     await this.writeLog('session-started', {
       sessionMode,
       durationMinutes,
-      allowedWindows,
-      allowedCategories,
+      preciseItems,
+      fuzzyPhrases,
     });
 
     this.startLoops();
@@ -246,10 +210,11 @@ export class GuardianRuntime {
     }
 
     this.stopLoops();
+    this.adminInterceptActive = false;
     const endedAt = new Date().toISOString();
     const actualDurationMinutes = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(this.state.startedAt)) / 60_000));
-    const primaryWindow = this.derivePrimaryWindow();
-    const primaryCategory = this.derivePrimaryCategory();
+    const primaryPrecise = this.derivePrimaryPrecise();
+    const primaryFuzzy = this.derivePrimaryFuzzy();
     const summary = {
       sessionMode: this.state.sessionMode,
       startedAt: this.state.startedAt,
@@ -259,10 +224,10 @@ export class GuardianRuntime {
       plannedDurationMinutes: this.state.sessionMode === 'countdown' ? this.state.durationMinutes : null,
       violationCount: this.state.violationCount,
       violations: this.state.violations,
-      allowedWindows: this.state.allowedWindows,
-      allowedCategories: this.state.allowedCategories,
-      primaryWindow,
-      primaryCategory,
+      preciseItems: this.state.preciseItems,
+      fuzzyPhrases: this.state.fuzzyPhrases,
+      primaryPrecise,
+      primaryFuzzy,
       completionReason: reason,
     };
 
@@ -282,14 +247,15 @@ export class GuardianRuntime {
 
   async resetSession() {
     this.stopLoops();
+    this.adminInterceptActive = false;
     this.state = {
       ...createInitialSessionState(),
       currentContext: this.state.currentContext,
       systemSafelistEnabled: this.preferences.systemSafelistEnabled !== false,
     };
     this.matchStats = {
-      windowHits: {},
-      categoryHits: {},
+      preciseHits: {},
+      fuzzyHits: {},
     };
     this.sendState();
     return this.getState();
@@ -350,19 +316,21 @@ export class GuardianRuntime {
 
     const decision = decideContext({
       context,
-      allowedWindows: this.state.allowedWindows,
-      allowedCategories: this.state.allowedCategories,
+      preciseItems: this.state.preciseItems,
+      fuzzyPhrases: this.state.fuzzyPhrases,
       systemSafelistEnabled: this.preferences.systemSafelistEnabled !== false,
+      systemSafelistRules: this.preferences.systemSafelistRules || getDefaultSystemSafelistRules(),
+      userSafelistRules: this.preferences.userSafelistRules || [],
     });
 
     if (decision.allowed) {
-      if (decision.matchedWindow) {
-        this.state.recentAllowedWindow = decision.matchedWindow;
-        this.trackMatch('windowHits', decision.matchedWindow.id);
+      if (decision.matchedPrecise) {
+        this.state.recentPreciseItem = decision.matchedPrecise;
+        this.trackMatch('preciseHits', decision.matchedPrecise.id);
       }
 
-      if (decision.matchedCategory) {
-        this.trackMatch('categoryHits', decision.matchedCategory.id);
+      if (decision.matchedFuzzy) {
+        this.trackMatch('fuzzyHits', decision.matchedFuzzy.id);
       }
 
       this.sendState();
@@ -371,16 +339,33 @@ export class GuardianRuntime {
 
     const signature = `${context.windowId}:${context.processPath || context.processName}:${decision.reason}`;
     const now = Date.now();
-    const minimized = context.windowId ? this.windows.minimizeWindow(context.windowId) : false;
-    const postContext = await this.resolvePostViolationContext(context);
+    const minimizeAttempted = Boolean(context.windowId);
+    let minimizeResult;
+    let minimizedVia;
+    if (!minimizeAttempted) {
+      minimizeResult = { windowId: context.windowId ?? null, dispatched: false, error: 'no-window' };
+      minimizedVia = 'none';
+    } else if (this.adminInterceptActive && this.minimizer?.isReady?.()) {
+      minimizeResult = await this.minimizer.minimize(context.windowId);
+      minimizedVia = 'helper';
+      const recoverable = ['helper-not-ready', 'helper-timeout', 'helper-disconnected', 'helper-failed'];
+      if (!minimizeResult?.dispatched && recoverable.includes(minimizeResult?.error)) {
+        minimizeResult = this.windows.minimizeWindow(context.windowId);
+        minimizedVia = 'local';
+      }
+    } else {
+      minimizeResult = this.windows.minimizeWindow(context.windowId);
+      minimizedVia = 'local';
+    }
+    const postContext = this.captureForegroundContext();
     this.state.currentContext = postContext;
+
+    const stillForeground = Boolean(postContext?.windowId && postContext.windowId === context.windowId);
 
     const isDuplicate = signature === this.lastViolation.signature
       && now - this.lastViolation.at < DUPLICATE_VIOLATION_WINDOW_MS;
 
-    this.lastViolation = this.isStablePostViolationContext(postContext, context)
-      ? { signature: '', at: 0 }
-      : { signature, at: now };
+    this.lastViolation = stillForeground ? { signature, at: now } : { signature: '', at: 0 };
 
     if (isDuplicate) {
       this.sendState();
@@ -395,9 +380,7 @@ export class GuardianRuntime {
       processPath: context.processPath,
       windowId: context.windowId,
       reason: decision.reason,
-      minimized,
-      restoredAllowedWindow: false,
-      suppressedBySystemSafelist: false,
+      minimizedVia,
     };
 
     this.state.violationCount += 1;
@@ -423,7 +406,7 @@ export class GuardianRuntime {
       return;
     }
 
-    const file = path.join(this.logDir, `forest-${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const file = path.join(this.logDir, `forest-${toLocalDateKey()}.jsonl`);
     const row = JSON.stringify({
       kind,
       timestamp: new Date().toISOString(),
@@ -440,23 +423,23 @@ export class GuardianRuntime {
     this.matchStats[bucket][key] = (this.matchStats[bucket][key] || 0) + 1;
   }
 
-  derivePrimaryWindow() {
-    if (this.state.allowedWindows.length > 0) {
-      return this.state.allowedWindows[0];
+  derivePrimaryPrecise() {
+    if (this.state.preciseItems.length > 0) {
+      return this.state.preciseItems[0];
     }
 
-    const [primaryId] = Object.entries(this.matchStats.windowHits).sort((left, right) => right[1] - left[1])[0] || [];
-    return this.state.allowedWindows.find((item) => item.id === primaryId) || this.state.recentAllowedWindow || null;
+    const [primaryId] = Object.entries(this.matchStats.preciseHits).sort((left, right) => right[1] - left[1])[0] || [];
+    return this.state.preciseItems.find((item) => item.id === primaryId) || this.state.recentPreciseItem || null;
   }
 
-  derivePrimaryCategory() {
-    const [primaryId] = Object.entries(this.matchStats.categoryHits).sort((left, right) => right[1] - left[1])[0] || [];
+  derivePrimaryFuzzy() {
+    const [primaryId] = Object.entries(this.matchStats.fuzzyHits).sort((left, right) => right[1] - left[1])[0] || [];
     if (primaryId) {
-      return this.state.allowedCategories.find((item) => item.id === primaryId) || null;
+      return this.state.fuzzyPhrases.find((item) => item.id === primaryId) || null;
     }
 
-    if (this.state.allowedCategories.length === 1) {
-      return this.state.allowedCategories[0];
+    if (this.state.fuzzyPhrases.length === 1) {
+      return this.state.fuzzyPhrases[0];
     }
 
     return null;

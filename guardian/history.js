@@ -56,31 +56,31 @@ function sessionDurationMinutes(session) {
 export function summarizeDay(dateKey, sessions) {
   const totalMinutes = sessions.reduce((sum, session) => sum + sessionDurationMinutes(session), 0);
   const totalViolations = sessions.reduce((sum, session) => sum + Number(session.violationCount || 0), 0);
-  const topWindowSession = pickTopSession(sessions.filter((session) => session.primaryWindow?.label), sessionDurationMinutes);
-  const topCategorySession = pickTopSession(sessions.filter((session) => session.primaryCategory?.name), sessionDurationMinutes);
+  const topPreciseSession = pickTopSession(sessions.filter((session) => session.primaryPrecise?.label), sessionDurationMinutes);
+  const topFuzzySession = pickTopSession(sessions.filter((session) => session.primaryFuzzy?.text || session.primaryFuzzy?.setName), sessionDurationMinutes);
 
   return {
     dateKey,
     totalMinutes,
     totalSessions: sessions.length,
     totalViolations,
-    topWindowSession,
-    topCategorySession,
+    topPreciseSession,
+    topFuzzySession,
   };
 }
 
-function formatWindow(windowInfo) {
-  if (!windowInfo) {
+function formatPrecise(item) {
+  if (!item) {
     return '未记录';
   }
-  return windowInfo.label || windowInfo.initialTitle || windowInfo.processName || '未记录';
+  return item.label || item.title || item.processName || '未记录';
 }
 
-function formatCategory(category) {
-  if (!category?.name) {
+function formatFuzzy(item) {
+  if (!item) {
     return '未分类';
   }
-  return category.name;
+  return item.setName || item.text || '未分类';
 }
 
 function renderList(title, items, formatter) {
@@ -113,8 +113,8 @@ export function renderDayMarkdown(daySummary, sessions) {
     `- 当日总专注时长：${formatDurationMinutes(daySummary.totalMinutes)}`,
     `- 当日总会话数：${daySummary.totalSessions}`,
     `- 当日总违规次数：${daySummary.totalViolations}`,
-    `- 单窗口最长 session：${daySummary.topWindowSession ? `${formatWindow(daySummary.topWindowSession.primaryWindow)} · ${formatDurationMinutes(daySummary.topWindowSession.durationMinutes)}` : '暂无'}`,
-    `- 单分类最长 session：${daySummary.topCategorySession ? `${formatCategory(daySummary.topCategorySession.primaryCategory)} · ${formatDurationMinutes(daySummary.topCategorySession.durationMinutes)}` : '暂无'}`,
+    `- 单窗口最长 session：${daySummary.topPreciseSession ? `${formatPrecise(daySummary.topPreciseSession.primaryPrecise)} · ${formatDurationMinutes(daySummary.topPreciseSession.durationMinutes)}` : '暂无'}`,
+    `- 单分类最长 session：${daySummary.topFuzzySession ? `${formatFuzzy(daySummary.topFuzzySession.primaryFuzzy)} · ${formatDurationMinutes(daySummary.topFuzzySession.durationMinutes)}` : '暂无'}`,
     '',
   ];
 
@@ -124,7 +124,7 @@ export function renderDayMarkdown(daySummary, sessions) {
     const durationLabel = plannedDuration && plannedDuration !== actualDuration
       ? `${formatDurationMinutes(actualDuration)}（计划 ${formatDurationMinutes(plannedDuration)}）`
       : formatDurationMinutes(actualDuration);
-    const title = `${toLocalTime(session.startedAt)} - ${toLocalTime(session.endedAt)} · ${durationLabel} · ${formatCategory(session.primaryCategory)} / ${formatWindow(session.primaryWindow)}`;
+    const title = `${toLocalTime(session.startedAt)} - ${toLocalTime(session.endedAt)} · ${durationLabel}`;
     lines.push(`## ${title}`);
     lines.push('');
     lines.push(`- 开始时间：${toLocalDateTime(session.startedAt)}`);
@@ -136,10 +136,8 @@ export function renderDayMarkdown(daySummary, sessions) {
     }
     lines.push(`- 结束原因：${session.completionReason === 'completed' ? '倒计时结束' : '手动结束'}`);
     lines.push(`- 违规次数：${session.violationCount || 0}`);
-    lines.push(`- 主要窗口：${formatWindow(session.primaryWindow)}`);
-    lines.push(`- 主要分类：${formatCategory(session.primaryCategory)}`);
-    lines.push(renderList('允许窗口', session.allowedWindows, (item) => item.label || item.initialTitle || item.processName || '未命名窗口'));
-    lines.push(renderList('允许分类', session.allowedCategories, (item) => item.name || '未命名分类'));
+    lines.push(renderList('精准规则', session.preciseItems, (item) => item.label || item.title || item.processName || '未命名条目'));
+    lines.push(renderList('模糊短语', session.fuzzyPhrases, (item) => item.text || '未命名短语'));
     lines.push(renderViolations(session.violations));
     lines.push('');
   });
